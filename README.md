@@ -34,12 +34,12 @@ Every other menu-bar tool shows the percent. Pacer shows the **speed**: where yo
 Requires macOS 13+, Node ≥ 18, Xcode Command Line Tools (`xcode-select --install`), and a Claude Code login (it reads the same credential `/usage` uses).
 
 ```sh
-git clone https://github.com/dkremsa/claude-pacer.git ~/.claude/pacer
-cd ~/.claude/pacer && ./build.sh
-open "/Applications/Claude Pacer.app"
+brew install dkremsa/tap/claude-pacer
+brew services start claude-pacer          # samples every 10 min, survives reboots
+cp -R "$(brew --prefix)/opt/claude-pacer/Claude Pacer.app" /Applications/ && open "/Applications/Claude Pacer.app"
 ```
 
-`build.sh` compiles the app into `/Applications` and installs a launchd agent that samples every 10 minutes.
+Or from source: `git clone https://github.com/dkremsa/claude-pacer.git ~/.claude/pacer && cd ~/.claude/pacer && ./build.sh` — compiles the app into `/Applications` and installs a launchd agent that samples every 10 minutes.
 
 **Start at login:** System Settings → General → Login Items & Extensions → **+** → pick **Claude Pacer** from Applications. The sampler already runs at boot; this is for the menu-bar icon.
 
