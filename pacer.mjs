@@ -39,6 +39,8 @@ const MIN_ELAPSED = 0.02
 // model (input 1, output 5, cache write 1.25, cache read 0.1). The per-model weight is what gets fitted.
 const CLASSES = ['input', 'output', 'cache_write', 'cache_read']
 const CLASS_PRIOR = { input: 1, output: 5, cache_write: 1.25, cache_read: 0.1 }
+// Price-ratio priors per model relative to sonnet, used until the fit has enough trustworthy data.
+const PRIOR_WEIGHT = { haiku: 0.3, sonnet: 1, opus: 5, fable: 10, mythos: 10, other: 5 }
 
 mkdirSync(DIR, { recursive: true })
 
@@ -118,6 +120,13 @@ function loadSamples() {
 function windows(limits, samples, now) {
   return limits.map(l => {
     const key = l.kind + (l.scope ? ':' + l.scope : '')
+    const percent = Number.isFinite(l.percent) ? l.percent : 0
+    // An idle window (no usage yet) has resets_at: null — Date.parse(null) is NaN, and NaN here
+    // poisoned everything downstream (pace showed "—", advice said "ease off for the next NaNh").
+    // No reset time = the window hasn't started; it is idle by definition: speed 0, projected = used.
+    if (!Number.isFinite(l.resetsAt)) {
+      return { key, kind: l.kind, scope: l.scope, percent, long: (WINDOW_MIN[l.kind] || 300) > LONG_WINDOW_MIN, elapsed: 0, minutesLeft: null, speed: 0, rate: 0, projected: percent, allowedPerHour: null, resetsAt: null, idle: true }
+    }
     const minutesLeft = Math.max(1, (l.resetsAt - now) / 60000)
     const length = WINDOW_MIN[l.kind] || Math.max(minutesLeft, 5 * 60)
     const long = length > LONG_WINDOW_MIN
@@ -125,14 +134,14 @@ function windows(limits, samples, now) {
     // Short window: rate over the last 45 min projected to the reset.
     const hist = samples.filter(s => now - s.t <= RATE_WINDOW_MIN * 60000).map(s => ({ t: s.t, p: s.limits.find(m => m.kind === l.kind && (m.scope || null) === (l.scope || null))?.percent })).filter(x => x.p != null)
     let rate = 0
-    const first = hist.find(x => x.p <= l.percent)
-    if (first && now - first.t > 5 * 60000) rate = (l.percent - first.p) / ((now - first.t) / 60000)
+    const first = hist.find(x => Number.isFinite(x.p) && x.p <= percent)
+    if (first && now - first.t > 5 * 60000) rate = (percent - first.p) / ((now - first.t) / 60000)
     const elapsedMin = Math.max(length - minutesLeft, MIN_ELAPSED * length)
-    const speed = l.percent / elapsedMin * 60
-    const projected = long ? l.percent / Math.max(elapsed, MIN_ELAPSED) : l.percent + Math.max(0, rate) * minutesLeft
+    const speed = percent / elapsedMin * 60
+    const projected = long ? percent / Math.max(elapsed, MIN_ELAPSED) : percent + Math.max(0, rate) * minutesLeft
     // What you may spend per hour from here to land exactly on TARGET.
-    const allowedPerHour = Math.max(0, TARGET - l.percent) / minutesLeft * 60
-    return { key, kind: l.kind, scope: l.scope, percent: l.percent, long, elapsed, minutesLeft, speed, rate: rate * 60, projected, allowedPerHour, resetsAt: l.resetsAt }
+    const allowedPerHour = Math.max(0, TARGET - percent) / minutesLeft * 60
+    return { key, kind: l.kind, scope: l.scope, percent, long, elapsed, minutesLeft, speed, rate: rate * 60, projected: Number.isFinite(projected) ? projected : percent, allowedPerHour, resetsAt: l.resetsAt }
   })
 }
 
@@ -169,42 +178,52 @@ function nnls(X, y, iters = 20000) {
   }
   return w
 }
+// The weekly percent is an INTEGER, so a 10-minute delta is 0 or 1 and a per-sample regression fits
+// quantisation noise (34 samples once "measured" Fable at 0.22× Sonnet). Samples are therefore
+// accumulated into bins that each span ≥ FIT_BIN_PCT points before fitting, and a fit is only
+// trusted when it has ≥ FIT_MIN_BINS bins and every weight lands within PLAUSIBLE× of the prior.
+const FIT_BIN_PCT = 3, FIT_MIN_BINS = 40, PLAUSIBLE = 4
 function fit(samples, { cacheReadPrior = CLASS_PRIOR.cache_read } = {}) {
   const models = ['sonnet', 'opus', 'fable', 'haiku', 'other'].filter(m => samples.some(s => s.tokens?.[m]))
   const X = [], y = []
+  let bin = null
   for (let i = 1; i < samples.length; i++) {
     const cur = samples[i].limits.find(l => l.kind === 'weekly_all'), prev = samples[i - 1].limits.find(l => l.kind === 'weekly_all')
-    if (!cur || !prev || cur.percent < prev.percent) continue   // skip resets
-    const d = cur.percent - prev.percent
-    const row = models.map(m => { const t = samples[i].tokens?.[m]; if (!t) return 0; return (t.input * CLASS_PRIOR.input + t.output * CLASS_PRIOR.output + t.cache_write * CLASS_PRIOR.cache_write + t.cache_read * cacheReadPrior) / 1e6 })
-    if (row.every(v => v === 0) && d === 0) continue
-    X.push(row); y.push(d)
+    if (!cur || !prev || cur.percent < prev.percent) { bin = null; continue }   // reset: drop the open bin
+    bin ||= { start: prev.percent, row: new Array(models.length).fill(0) }
+    models.forEach((m, j) => { const t = samples[i].tokens?.[m]; if (t) bin.row[j] += (t.input * CLASS_PRIOR.input + t.output * CLASS_PRIOR.output + t.cache_write * CLASS_PRIOR.cache_write + t.cache_read * cacheReadPrior) / 1e6 })
+    if (cur.percent - bin.start >= FIT_BIN_PCT) { X.push(bin.row); y.push(cur.percent - bin.start); bin = null }
   }
-  // A fit needs sonnet as the baseline, at least one other model, and enough mixed samples —
-  // four samples of one model once "fitted" Fable at 1.0× (its own baseline) and the advice went negative.
-  if (!models.includes('sonnet') || models.length < 2 || X.length < 30) return { models, n: X.length, enough: false }
+  if (!models.includes('sonnet') || models.length < 2 || X.length < FIT_MIN_BINS) return { models, n: X.length, enough: false }
   const w = nnls(X, y)
+  const si = models.indexOf('sonnet')
+  if (!(w[si] > 0)) return { models, n: X.length, enough: false, why: 'sonnet weight 0' }
+  for (const [j, m] of models.entries()) {
+    if (m === 'other' || !(w[j] > 0)) continue
+    const rel = w[j] / w[si], prior = PRIOR_WEIGHT[m] || 5
+    if (rel > prior * PLAUSIBLE || rel < prior / PLAUSIBLE) return { models, n: X.length, enough: false, why: `${m} ${rel.toFixed(2)}× implausible vs prior ${prior}×` }
+  }
   const resid = X.reduce((s, row, i) => s + (row.reduce((a, v, j) => a + v * w[j], 0) - y[i]) ** 2, 0)
   const base = w[models.indexOf('sonnet')] || Math.min(...w.filter(v => v > 0)) || 1
   return { models, n: X.length, enough: true, weights: Object.fromEntries(models.map((m, j) => [m, w[j]])), relative: Object.fromEntries(models.map((m, j) => [m, w[j] / base])), residual: resid, cacheReadPrior }
 }
 
 // ---------------------------------------------------------------- advice
-// Price-ratio priors per model relative to sonnet, used until the fit has enough data.
-const PRIOR_WEIGHT = { haiku: 0.3, sonnet: 1, opus: 5, fable: 10, mythos: 10, other: 5 }
 const NAMES = { haiku: 'Haiku', sonnet: 'Sonnet', opus: 'Opus', fable: 'Fable', mythos: 'Mythos', other: 'other models' }
 function units(t, cacheReadPrior = CLASS_PRIOR.cache_read) {
   return (t.input * CLASS_PRIOR.input + t.output * CLASS_PRIOR.output + t.cache_write * CLASS_PRIOR.cache_write + t.cache_read * cacheReadPrior) / 1e6
 }
 /** One sentence: what to change to land at 100% of the worst window, or null when on pace. */
 function advise(ws, samples, fitted, now) {
-  const worst = ws.reduce((a, w) => (!a || w.projected > a.projected) ? w : a, null)
+  const worst = ws.filter(w => Number.isFinite(w.projected) && !w.idle).reduce((a, w) => (!a || w.projected > a.projected) ? w : a, null)
   if (!worst || worst.projected <= 100) return null
   const remaining = 100 - worst.percent
   if (remaining <= 0) return `${label(worst)} is used up — wait ${Math.round(worst.minutesLeft / 60)}h for the reset`
   const keep = remaining / (worst.projected - worst.percent)   // fraction of current speed that still fits
   const cut = 1 - keep
-  if (!worst.long) return `this session is burning fast — ease off for the next ${Math.round(worst.minutesLeft / 60 * 10) / 10}h (about ${Math.round(cut * 100)}% less)`
+  if (!worst.long) return Number.isFinite(worst.minutesLeft)
+    ? `this session is burning fast — ease off for the next ${Math.round(worst.minutesLeft / 60 * 10) / 10}h (about ${Math.round(cut * 100)}% less)`
+    : `this session is burning fast — ease off (about ${Math.round(cut * 100)}% less)`
   const weight = fitted?.enough ? { ...PRIOR_WEIGHT, ...fitted.relative } : PRIOR_WEIGHT
   // weighted spend share per model across this window
   const share = {}
@@ -264,7 +283,8 @@ function spendSince(samples, ms, now) {
 function weekMs(ws, now) { const w = ws.find(x => x.kind === 'weekly_all'); return w ? Math.max(0, WINDOW_MIN.weekly_all * 60000 - w.minutesLeft * 60000) : 7 * 24 * 3600000 }
 function buildStatus(limits, samples, now) {
   const ws = windows(limits, samples, now)
-  const worst = ws.reduce((a, w) => (!a || w.projected > a.projected) ? w : a, null)
+  const live = ws.filter(w => Number.isFinite(w.projected))
+  const worst = live.reduce((a, w) => (!a || w.projected > a.projected) ? w : a, null)
   const pace = worst ? Math.round(worst.projected) : null
   const level = pace == null ? 'unknown' : pace > 100 ? 'red' : pace > TARGET ? 'amber' : 'green'
   const fitted = fit(samples)
