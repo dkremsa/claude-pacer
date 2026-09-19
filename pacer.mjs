@@ -17,11 +17,12 @@
  * speed shown since the window opened (long windows) or the last 45 min (the 5-hour session).
  * The headline is the worst window. 100 = you run out exactly at reset. >80 amber, >100 red.
  */
-import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, writeFileSync, appendFileSync, existsSync, mkdirSync, readdirSync, statSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 
 const DIR = join(homedir(), '.claude', 'pacer')
 const SAMPLES = join(DIR, 'samples.jsonl')
@@ -79,14 +80,53 @@ async function identity(cred, profile) {
   const sub = cred.subscriptionType ? cred.subscriptionType[0].toUpperCase() + cred.subscriptionType.slice(1) : null
   const plan = [sub, tier].filter(Boolean).join(' ') || null
   try {
-    const res = await fetch(PROFILE_URL, { headers: { Authorization: `Bearer ${cred.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' } })
+    // Deliberately NOT getWithRetry: this is the display name, not the pacing figure, and the line below
+    // falls back to the on-disk profile. Spending the tick's retry budget on it would delay every window.
+    // It still needs the TIMEOUT: a fallback covers a failure, not a HANG, and undici waits 300 s by default —
+    // this runs once per Claude profile, so a hung endpoint would stall the tick four times over.
+    const res = await fetch(PROFILE_URL, { headers: { Authorization: `Bearer ${cred.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(ATTEMPT_MS) })
     if (res.ok) { const j = await res.json(); if (j.account?.uuid) return { id: j.account.uuid, email: j.account.email, plan } }
   } catch {}
   try { const o = JSON.parse(readFileSync(profile.config, 'utf8')).oauthAccount; if (o?.accountUuid) return { id: o.accountUuid, email: o.emailAddress, plan } } catch {}
   return { id: 'unknown', email: null, plan }
 }
+// Every remote usage read is one GET that can blip: none of these are public APIs and a 429 or a 504 under
+// load is ordinary — Letterknife's copy of the Anthropic call carries the same note. Without a retry one blip
+// left the figure stale for a whole 10-minute tick. ONE home for the policy, so a provider added later cannot
+// quietly get none of it, and it hands back the Response so each caller keeps its own non-OK semantics
+// (Gemini reads a 403 as "personal account, no quota"). Deliberately short: a click on the card kicks this
+// tick and waits 45 s for status.json to move, so the whole retry budget has to fit inside that — a longer
+// outage is what the next tick is for, and the interval stays 600. An auth failure is never retried, because
+// Pacer does not refresh tokens: the 401 would be the same 401.
+const RETRY_MS = [2000, 8000]
+const ATTEMPT_MS = 15000
+const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504])
+// 🚨 A PER-CALL budget is not a budget. A tick reads every provider in sequence — four Claude profiles on this
+// machine plus codex/cursor/gemini/copilot — so "10 s of retries" is 10 s EIGHT TIMES, and offline, where every
+// read fails instantly and then retries, that is ~80 s of pure waiting. The card's click-to-poll gives up at
+// 45 s, so the first version of this broke the one interactive path it was written to protect. ONE deadline for
+// the whole run instead: 0 means none (a direct call or a test), and `startRetryBudget` is what a tick sets.
+const RETRY_BUDGET_MS = 20000
+let retryUntil = 0
+function startRetryBudget(now = Date.now()) { retryUntil = now + RETRY_BUDGET_MS }
+async function getWithRetry(url, opts, label) {
+  let err
+  for (let attempt = 0; attempt <= RETRY_MS.length; attempt++) {
+    if (attempt) {
+      if (retryUntil && Date.now() + RETRY_MS[attempt - 1] > retryUntil) break   // the run is out of budget
+      await new Promise(r => setTimeout(r, RETRY_MS[attempt - 1]))
+    }
+    let res
+    // The signal goes AFTER the spread: before it, a caller passing its own `signal` would silently drop the
+    // timeout and leave the whole tick hanging on undici's 300 s default.
+    try { res = await fetch(url, { ...opts, signal: AbortSignal.timeout(ATTEMPT_MS) }) } catch (e) { err = e; continue }
+    if (res.ok || !RETRYABLE.has(res.status)) return res
+    err = new Error(`${label} ${res.status}`)
+  }
+  throw err
+}
 async function fetchUsage(cred) {
-  const res = await fetch(USAGE_URL, { headers: { Authorization: `Bearer ${cred.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' } })
+  const res = await getWithRetry(USAGE_URL, { headers: { Authorization: `Bearer ${cred.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' } }, 'usage')
   if (!res.ok) throw new Error(`usage ${res.status}`)
   const j = await res.json()
   // Two response shapes have been seen in the wild: `limits[]`, and top-level five_hour/seven_day objects.
@@ -327,7 +367,7 @@ function rememberAccount(accounts, acct, now) {
  *  whole reading when the live ask fails (expired token, offline) or `live` is off. */
 const CODEX_USAGE_URL = 'https://chatgpt.com/backend-api/wham/usage'
 async function codexLive(auth, now) {
-  const res = await fetch(CODEX_USAGE_URL, { headers: { Authorization: `Bearer ${auth.tokens.access_token}`, 'ChatGPT-Account-Id': auth.tokens.account_id || '', 'User-Agent': 'claude-pacer', Accept: 'application/json' }, signal: AbortSignal.timeout(15000) })
+  const res = await getWithRetry(CODEX_USAGE_URL, { headers: { Authorization: `Bearer ${auth.tokens.access_token}`, 'ChatGPT-Account-Id': auth.tokens.account_id || '', 'User-Agent': 'claude-pacer', Accept: 'application/json' } }, 'codex usage')
   if (!res.ok) throw new Error(`codex usage ${res.status}`)
   const j = await res.json()
   const limits = []
@@ -396,7 +436,7 @@ async function cursorReading(now) {
   const token = get('accessToken')
   if (!token) return null
   const uid = JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()).sub.split('|').pop()
-  const res = await fetch('https://cursor.com/api/usage-summary', { headers: { Cookie: `WorkosCursorSessionToken=${uid}%3A%3A${token}`, 'User-Agent': 'pacer', Accept: 'application/json' }, signal: AbortSignal.timeout(15000) })
+  const res = await getWithRetry('https://cursor.com/api/usage-summary', { headers: { Cookie: `WorkosCursorSessionToken=${uid}%3A%3A${token}`, 'User-Agent': 'pacer', Accept: 'application/json' } }, 'cursor usage')
   if (!res.ok) throw new Error(`cursor usage ${res.status}`)
   const j = await res.json()
   const plan = j.individualUsage?.plan
@@ -415,7 +455,7 @@ async function geminiReading(now) {
   try { creds = JSON.parse(readFileSync(join(homedir(), '.gemini', 'oauth_creds.json'), 'utf8')) } catch { return null }
   if (!creds.access_token || (creds.expiry_date && creds.expiry_date < now + 60000)) return null
   const call = async (method, body) => {
-    const res = await fetch(`https://cloudcode-pa.googleapis.com/v1internal:${method}`, { method: 'POST', headers: { Authorization: `Bearer ${creds.access_token}`, 'Content-Type': 'application/json', 'User-Agent': 'pacer' }, body: JSON.stringify(body), signal: AbortSignal.timeout(15000) })
+    const res = await getWithRetry(`https://cloudcode-pa.googleapis.com/v1internal:${method}`, { method: 'POST', headers: { Authorization: `Bearer ${creds.access_token}`, 'Content-Type': 'application/json', 'User-Agent': 'pacer' }, body: JSON.stringify(body) }, `gemini ${method}`)
     if (res.status === 403) return {}   // a personal account: Google moved those to Antigravity, this login has no quota to read
     if (!res.ok) throw new Error(`gemini ${method} ${res.status}`)
     return res.json()
@@ -438,7 +478,7 @@ async function copilotReading(now) {
   let token
   try { token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() } catch { return null }
   if (!token) return null
-  const res = await fetch('https://api.github.com/copilot_internal/user', { headers: { Authorization: `token ${token}`, 'Editor-Version': 'vscode/1.95.0', 'User-Agent': 'pacer' }, signal: AbortSignal.timeout(15000) })
+  const res = await getWithRetry('https://api.github.com/copilot_internal/user', { headers: { Authorization: `token ${token}`, 'Editor-Version': 'vscode/1.95.0', 'User-Agent': 'pacer' } }, 'copilot')
   if (!res.ok) throw new Error(`copilot ${res.status}`)
   const j = await res.json()
   const q = j.quota_snapshots?.premium_interactions
@@ -461,6 +501,8 @@ async function antigravityReading(now) {
   let status
   for (const port of ports) {   // it listens on an https port and a plain one; only the plain one answers a bare fetch
     try {
+      // Deliberately NOT getWithRetry: a LOCAL language server, where "not running" is the ordinary answer
+      // rather than a blip. Retrying a closed port for ten seconds would delay the tick to learn nothing.
       const res = await fetch(`http://127.0.0.1:${port}/exa.language_server_pb.LanguageServerService/GetUserStatus`, { method: 'POST', headers: { 'Content-Type': 'application/json', 'Connect-Protocol-Version': '1', 'X-Codeium-Csrf-Token': csrf }, body: JSON.stringify({ metadata: { ideName: 'antigravity', extensionName: 'antigravity', locale: 'en' } }), signal: AbortSignal.timeout(4000) })
       if (res.ok) { status = (await res.json()).userStatus; break }
     } catch {}
@@ -545,6 +587,7 @@ function buildStatus(limits, all, now, acctId) {
 // ---------------------------------------------------------------- commands
 async function tick() {
   const now = Date.now()
+  startRetryBudget(now)   // one retry deadline for every provider read this tick, not one each
   const samples = loadSamples()
   const last = samples.at(-1)?.t || now - 10 * 60000
   // Every profile that answers is a live login. Pacer never refreshes a token (that is Claude Code's, and rotating
@@ -638,8 +681,18 @@ function printStatus(s) {
   for (const [k, ts] of Object.entries(s.resets)) console.log(`  observed resets ${k}: ` + ts.map(t => new Date(t).toISOString().slice(0, 16)).join(', '))
 }
 
-const cmd = process.argv[2] || 'status'
-if (cmd === 'tick') await tick()
-else if (cmd === 'status') await status()
-else if (cmd === 'fit') { const s = loadSamples(); console.log(JSON.stringify({ prior: fit(s), cacheFull: fit(s, { cacheReadPrior: 1 }) }, null, 2)) }
-else { console.log('usage: pacer tick|status|fit'); process.exit(1) }
+// Exported so the retry policy can be tested against a stub server instead of a real provider.
+export { getWithRetry, RETRY_MS, RETRYABLE, ATTEMPT_MS, RETRY_BUDGET_MS, startRetryBudget }
+
+// Run the CLI only when this file IS the entry point, so importing it for a test does not fire a tick.
+// Fail-OPEN: if argv[1] cannot be resolved the CLI still runs, because a guard that silently does nothing
+// is worse than one that never triggers — launchd and the Homebrew wrapper both pass a real path.
+let isMain = true
+try { isMain = import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href } catch {}
+if (isMain) {
+  const cmd = process.argv[2] || 'status'
+  if (cmd === 'tick') await tick()
+  else if (cmd === 'status') await status()
+  else if (cmd === 'fit') { const s = loadSamples(); console.log(JSON.stringify({ prior: fit(s), cacheFull: fit(s, { cacheReadPrior: 1 }) }, null, 2)) }
+  else { console.log('usage: pacer tick|status|fit'); process.exit(1) }
+}
