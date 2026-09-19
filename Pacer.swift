@@ -16,6 +16,7 @@ struct Status {
     var pace: Int?; var level = "unknown"; var worst = ""; var t: Double = 0; var error: String?
     var windows: [Window] = []
     var accounts: [Account] = []
+    var acct: String?   // the login the TOP LEVEL is pinned to — NOT necessarily accounts[0], which is the one used last
     var stamp: Double = 0   // moves on EVERY tick, failed ones included (`t` deliberately does not)
     var accountsT: Double = 0   // when `accounts` were read; differs from `t` only while the Claude read is failing
     var nextReset: Double?   // epoch seconds of the soonest reset among live logins
@@ -31,6 +32,7 @@ func loadStatus() -> Status {
     s.worst = j["worst"] as? String ?? ""
     s.t = j["t"] as? Double ?? 0
     s.error = j["error"] as? String
+    s.acct = j["acct"] as? String
     s.advice = j["advice"] as? String
     if let c = j["cost"] as? [String: Any] {
         s.costDay = (c["day"] as? [String: Any])?["total"] as? Double ?? 0
@@ -149,21 +151,31 @@ func drawIcon(_ vendor: String, in r: NSRect) {
 /// tab shows that subscription; a click anywhere else polls fresh stats.
 final class PanelView: NSView {
     static let width: CGFloat = 320
+    /// Darkens (or in light mode lightens) the footer behind the text without making it opaque — see `draw`.
+    static let scrim = NSColor(name: "pacerScrim") { ap in
+        ap.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? NSColor(white: 0, alpha: 0.4) : NSColor(white: 1, alpha: 0.55)
+    }
     var status = Status() { didSet { if !status.accounts.contains(where: { $0.id == selectedId }) { selectedId = status.accounts.first?.id ?? "" }; layoutPanel() } }
     var polling = false { didSet { needsDisplay = true } }
     var selectedId = ""
     var onClick: (() -> Void)?
+    var onSelect: (() -> Void)?
     override var isFlipped: Bool { true }
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
-        if let i = tabRects().firstIndex(where: { $0.insetBy(dx: -2, dy: -4).contains(p) }) { selectedId = status.accounts[i].id; needsDisplay = true; return }
+        if let i = tabRects().firstIndex(where: { $0.insetBy(dx: -2, dy: -4).contains(p) }) { selectedId = status.accounts[i].id; needsDisplay = true; onSelect?(); return }
         onClick?()
     }
 
     private let pad: CGFloat = 14
+    /// Air between the last window and the recommendation — the two are read separately, so they are spaced apart.
+    /// `layoutPanel` and `draw` must use the same number or the panel is sized for a gap it does not draw.
+    private let adviceGap: CGFloat = 18
     private var inner: CGFloat { PanelView.width - pad * 2 }
-    private var account: Account? { status.accounts.first { $0.id == selectedId } ?? status.accounts.first }
+    /// Which account this card — and, through `App.refresh`, the menu bar — is showing. ONE home: the icon and
+    /// its tooltip must never name a different subscription from the one the card is open on.
+    var account: Account? { status.accounts.first { $0.id == selectedId } ?? status.accounts.first }
     /// Tabs always get rows of their own under the title and wrap: icon + ring pair each, a hairline between them.
     private let tabW: CGFloat = 52, tabGap: CGFloat = 13
     private var tabsPerRow: Int { max(1, Int((inner + tabGap) / (tabW + tabGap))) }
@@ -201,14 +213,15 @@ final class PanelView: NSView {
     private func footerLines(_ a: Account) -> Int { (a.id == status.accounts.first?.id ? 1 : 0) + 1 + (isStale(a) ? 1 : 0) }
     /// The tallest account sets the height, so switching tabs never resizes an open menu.
     private func layoutPanel() {
-        let fixed: CGFloat = 36 + CGFloat(tabRows) * 28 + (status.error != nil ? 22 : 0) + 6 + 10 + 1 + 9 + 8
+        let fixed: CGFloat = 36 + CGFloat(tabRows) * 28 + (status.error != nil ? 22 : 0) + adviceGap + 10 + 1 + 9 + 8
         let h: CGFloat = status.accounts.map { (a: Account) -> CGFloat in fixed + CGFloat(a.windows.count) * 55 + adviceHeight(a) + CGFloat(footerLines(a)) * 18 }.max() ?? 100
         setFrameSize(NSSize(width: PanelView.width, height: h)); needsDisplay = true
     }
 
     override func draw(_ dirty: NSRect) {
         guard let a = account else { return }
-        let mut = NSColor.secondaryLabelColor
+        // `mut` is `secondaryLabelColor`'s job at an alpha that survives a translucent menu over a light window.
+        let mut = NSColor.labelColor.withAlphaComponent(0.72)
         let now = Date().timeIntervalSince1970 * 1000
         func text(_ s: String, _ font: NSFont, _ color: NSColor) -> NSAttributedString { NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color]) }
         var y: CGFloat = 12
@@ -252,12 +265,16 @@ final class PanelView: NSView {
             text(w.hoursLeft.map { "resets in " + countdown(max(0, $0 - (now - status.accountsT) / 3600000)) } ?? (a.current ? "idle" : "reset — ready"), .systemFont(ofSize: 13), w.hoursLeft == nil && !a.current ? .systemGreen : mut).draw(at: NSPoint(x: pad, y: y))
             y += 17
         }
-        y += 6
+        y += adviceGap
         let ah = adviceHeight(a)
         advice(a).draw(with: NSRect(x: pad, y: y, width: inner, height: ah), options: [.usesLineFragmentOrigin])
-        y = bounds.height - 8 - CGFloat(footerLines(a)) * 18 - 10
-        NSColor.separatorColor.setFill(); NSRect(x: pad, y: y, width: inner, height: 1).fill()
-        y += 10
+        let sepY = bounds.height - 8 - CGFloat(footerLines(a)) * 18 - 10
+        // The menu is translucent on purpose, but a light window behind it washed the footer out — these lines are
+        // the quietest on the card and the lowest, where the menu has least of its own material. A scrim gives them
+        // a floor, and it separates the footer well enough on its own: there is deliberately no rule above it.
+        PanelView.scrim.setFill()
+        NSBezierPath(roundedRect: NSRect(x: pad - 6, y: sepY + 4, width: inner + 12, height: bounds.height - sepY - 8), xRadius: 7, yRadius: 7).fill()
+        y = sepY + 10
         if a.id == status.accounts.first?.id {
             text(String(format: "API-equiv $%.0f today · $%.0f this week", status.costDay, status.costWeek), .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y))
             y += 18
@@ -290,19 +307,24 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.delegate = self
         item.menu = menu
         panel.onClick = { [weak self] in self?.poll() }
+        panel.onSelect = { [weak self] in self?.refresh() }   // the icon follows the tab
         refresh()
         let t = Timer(timeInterval: 60, repeats: true) { _ in self.refresh() }
         RunLoop.main.add(t, forMode: .common)
     }
     func menuWillOpen(_ menu: NSMenu) { refresh() }
 
-    /// Two rings, session then week, for the live Claude login. No numbers up here.
-    func rings(_ s: Status, stale: Bool) -> NSImage {
-        let pick = ringPair(s.accounts.first?.windows ?? s.windows)   // the login used last; top-level is pinned to the default one
-        let vendor = s.accounts.first?.vendor ?? "claude"
+    /// Two rings, session then week, for the account whose TAB is open — the tab outlives the menu, so the
+    /// menu bar and the card say the same thing rather than the icon silently meaning a different subscription.
+    /// A remembered login shows what is used, exactly as its tab does. (`status.json`'s top level stays pinned
+    /// to the default Claude login regardless: that is roam's contract, not this icon's.)
+    func rings(_ a: Account?, _ s: Status, live: Bool) -> NSImage {
+        let pick = ringPair(a?.windows ?? s.windows)
+        let vendor = a?.vendor ?? "claude"
+        let stale = live && Date().timeIntervalSince1970 * 1000 - (a?.asOf ?? s.t) > staleAfterMs
         return NSImage(size: NSSize(width: 56, height: 18), flipped: false) { _ in
             drawIcon(vendor, in: NSRect(x: 1, y: 2, width: 14, height: 14))
-            for (i, w) in pick.enumerated() { drawRing(w, live: true, stale: stale, center: NSPoint(x: 28 + CGFloat(i) * 19, y: 9), radius: 6, line: 3) }
+            for (i, w) in pick.enumerated() { drawRing(w, live: live, stale: stale, center: NSPoint(x: 28 + CGFloat(i) * 19, y: 9), radius: 6, line: 3) }
             return true
         }
     }
@@ -310,11 +332,19 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func refresh() {
         let s = loadStatus()
         let stale = Date().timeIntervalSince1970 * 1000 - s.t > staleAfterMs
+        panel.status = s   // before the icon: it reads the tab, and a tab whose account is gone is reset here
+        // ONE `live`, feeding both the drawing and the words: a remembered login has no speed, so `drawRing`
+        // fills its rings with what was USED and colours them on a different ladder. Deriving the tooltip from the
+        // same flag is what stops it explaining a red ring on a scale the ring was not drawn to.
+        let shown = panel.account
+        let live = shown?.current ?? true
         item.button?.attributedTitle = NSAttributedString(string: "")
-        item.button?.image = rings(s, stale: stale)
-        item.button?.toolTip = "Pacer — session and week speed (projected % at reset; solid red = runs out first)"
+        item.button?.image = rings(shown, s, live: live)
+        let scale = live ? "session and week speed (projected % at reset; solid red = runs out first)"
+                         : "session and week used at the last check (green = it has reset since; solid red = used up)"
+        item.button?.toolTip = [shown?.title ?? providerNames[shown?.provider ?? "claude"], shown?.email]
+            .compactMap { $0 }.joined(separator: " · ") + " — " + scale
         if !stale { notifyIfNeeded(s) }
-        panel.status = s
         scheduleResetPoll(s)
     }
 
@@ -357,12 +387,16 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // Thresholds, each fired once per crossing: pace goes over 100 / comes back under; a window passes 90% used (once per reset).
     func notifyIfNeeded(_ s: Status) {
         let d = UserDefaults.standard
+        // These read s.pace / s.windows — the login `acct` pins the top level to — while the menu bar now follows
+        // whichever tab is open. With more than one account the notification has to say whose figure it is.
+        let pinned = s.accounts.first { $0.id == s.acct } ?? s.accounts.first
+        let whose = s.accounts.count > 1 ? (pinned?.email ?? pinned?.title).map { " · " + $0 } ?? "" : ""
         if let pace = s.pace {
             let over = pace > 100
             if over != d.bool(forKey: "overPace") {
                 d.set(over, forKey: "overPace")
-                if over { notify("Off pace: \(pace)", s.advice.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "You will run out before the reset") }
-                else if d.bool(forKey: "everOver") { notify("Back on pace: \(pace)", "Current speed fits the limits again") }
+                if over { notify("Off pace: \(pace)" + whose, s.advice.map { $0.prefix(1).uppercased() + $0.dropFirst() } ?? "You will run out before the reset") }
+                else if d.bool(forKey: "everOver") { notify("Back on pace: \(pace)" + whose, "Current speed fits the limits again") }
             }
             if over { d.set(true, forKey: "everOver") }
         }
@@ -373,7 +407,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if abs(d.integer(forKey: resetKey) - resetAt) > 180 { d.set(false, forKey: key); d.set(resetAt, forKey: resetKey) }
             if w.percent >= 90 && !d.bool(forKey: key), let h = w.hoursLeft {
                 d.set(true, forKey: key)
-                notify("\(name(w.key)) at \(Int(w.percent))%", "Resets in " + countdown(h))
+                notify("\(name(w.key)) at \(Int(w.percent))%" + whose, "Resets in " + countdown(h))
             }
         }
     }

@@ -4,7 +4,7 @@ Two rings in the macOS menu bar that tell you whether your AI coding subscriptio
 
 <img src="docs/icon.png" width="96" align="right">
 
-**The rings** are the session and the week of the login you used last. Each fills to its **speed**: the projected % at reset if you keep going like this. 100 = you run out exactly at reset. Green ≤ 80, amber ≤ 100, and past 100 the ring becomes a solid red disc. No numbers up there.
+**The rings** are the session and the week of whichever tab is open — the Claude login you used last, until you pick another. Each fills to its **speed**: the projected % at reset if you keep going like this. 100 = you run out exactly at reset. Green ≤ 80, amber ≤ 100, and past 100 the ring becomes a solid red disc. (A tab you are not logged into has no speed: its rings show what was **used**, on a tighter scale, the way its card does.) No numbers up there.
 
 Click it:
 
@@ -15,12 +15,12 @@ Session (5h)              44%  speed 54
 Week · all models         16%  speed 133
 Week · Fable              12%  speed 116
 To fit the week: use Fable about 58% less
-─────────────────────────────────────────
+
 API-equiv $62 today · $410 this week
 ● you@example.com · Max 20x
 ```
 
-Click a tab to see that account; click anywhere else on the card to sample now.
+Click a tab to see that account, and the menu bar follows it — the rings up there and the card always mean the same subscription. Click anywhere else on the card to sample now.
 
 ## What's different
 
