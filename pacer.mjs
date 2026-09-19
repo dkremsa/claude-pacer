@@ -498,7 +498,7 @@ function accountsView(accounts, currentId, samples, now, live, firstId = current
     const ws = windows(rolled(a.limits || [], now), hist, now).map(w => current ? w : { ...w, speed: 0, rate: 0, projected: w.percent })
     const advice = a.id === currentId ? advise(ws, hist, null, now) : current ? (advise(ws, hist, null, now) || '').replace(' — no per-model data yet', '') || null : standby(ws)
     return { id: a.id, provider: a.provider, vendor: a.vendor || VENDOR[a.provider] || a.provider, title: a.title || null, via: a.via || null, email: a.email, plan: a.plan, current, asOf: a.asOf, windows: ws, advice }
-  // The Claude login used last leads (the menu-bar rings are its); your own subscriptions by provider, then what a wrapper resells.
+  // The Claude login used last leads, so it is the tab the menu bar opens on; your own subscriptions by provider, then what a wrapper resells.
   }).sort((a, b) => ((b.id === firstId) - (a.id === firstId)) || (!!a.via - !!b.via) || (ORDER.indexOf(a.provider) - ORDER.indexOf(b.provider)) || (b.current - a.current) || b.asOf - a.asOf)
 }
 
