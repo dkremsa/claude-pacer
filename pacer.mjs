@@ -84,7 +84,7 @@ async function identity(cred, profile) {
     // falls back to the on-disk profile. Spending the tick's retry budget on it would delay every window.
     // It still needs the TIMEOUT: a fallback covers a failure, not a HANG, and undici waits 300 s by default —
     // this runs once per Claude profile, so a hung endpoint would stall the tick four times over.
-    const res = await fetch(PROFILE_URL, { headers: { Authorization: `Bearer ${cred.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(ATTEMPT_MS) })
+    const res = await fetch(PROFILE_URL, { headers: { Authorization: `Bearer ${cred.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(Math.max(1, attemptMs())) })
     if (res.ok) { const j = await res.json(); if (j.account?.uuid) return { id: j.account.uuid, email: j.account.email, plan } }
   } catch {}
   try { const o = JSON.parse(readFileSync(profile.config, 'utf8')).oauthAccount; if (o?.accountUuid) return { id: o.accountUuid, email: o.emailAddress, plan } } catch {}
@@ -101,25 +101,30 @@ async function identity(cred, profile) {
 const RETRY_MS = [2000, 8000]
 const ATTEMPT_MS = 15000
 const RETRYABLE = new Set([408, 425, 429, 500, 502, 503, 504])
-// 🚨 A PER-CALL budget is not a budget. A tick reads every provider in sequence — four Claude profiles on this
-// machine plus codex/cursor/gemini/copilot — so "10 s of retries" is 10 s EIGHT TIMES, and offline, where every
-// read fails instantly and then retries, that is ~80 s of pure waiting. The card's click-to-poll gives up at
-// 45 s, so the first version of this broke the one interactive path it was written to protect. ONE deadline for
-// the whole run instead: 0 means none (a direct call or a test), and `startRetryBudget` is what a tick sets.
-const RETRY_BUDGET_MS = 20000
-let retryUntil = 0
-function startRetryBudget(now = Date.now()) { retryUntil = now + RETRY_BUDGET_MS }
+// 🚨 A PER-CALL budget is not a budget. A tick reads every provider in SEQUENCE — four Claude profiles on this
+// machine plus codex/cursor/gemini/copilot — so a per-call allowance is that allowance EIGHT TIMES: the first
+// version counted 10 s of sleeps, ignored the three 15 s timeouts under them, and took ~80 s offline against
+// the 45 s the card's click-to-poll waits. So there is ONE deadline for the whole read phase, and it does both
+// jobs: no retry sleeps past it, and every attempt's timeout is CLAMPED to what is left of it, which is what
+// caps the tick as a whole rather than capping each read and hoping. 0 = no deadline (a direct call, or a test).
+const READ_BUDGET_MS = 20000
+let readUntil = 0
+function startReadBudget(now = Date.now()) { readUntil = now + READ_BUDGET_MS }
+/** What an attempt may spend: its own timeout, or the rest of the tick's budget, whichever is shorter. */
+function attemptMs() { return readUntil ? Math.min(ATTEMPT_MS, readUntil - Date.now()) : ATTEMPT_MS }
 async function getWithRetry(url, opts, label) {
   let err
   for (let attempt = 0; attempt <= RETRY_MS.length; attempt++) {
     if (attempt) {
-      if (retryUntil && Date.now() + RETRY_MS[attempt - 1] > retryUntil) break   // the run is out of budget
+      if (readUntil && Date.now() + RETRY_MS[attempt - 1] > readUntil) break   // the run is out of budget
       await new Promise(r => setTimeout(r, RETRY_MS[attempt - 1]))
     }
+    const budget = attemptMs()
+    if (budget <= 0) { err ||= new Error(`${label}: read budget spent`); break }
     let res
     // The signal goes AFTER the spread: before it, a caller passing its own `signal` would silently drop the
     // timeout and leave the whole tick hanging on undici's 300 s default.
-    try { res = await fetch(url, { ...opts, signal: AbortSignal.timeout(ATTEMPT_MS) }) } catch (e) { err = e; continue }
+    try { res = await fetch(url, { ...opts, signal: AbortSignal.timeout(budget) }) } catch (e) { err = e; continue }
     if (res.ok || !RETRYABLE.has(res.status)) return res
     err = new Error(`${label} ${res.status}`)
   }
@@ -587,7 +592,7 @@ function buildStatus(limits, all, now, acctId) {
 // ---------------------------------------------------------------- commands
 async function tick() {
   const now = Date.now()
-  startRetryBudget(now)   // one retry deadline for every provider read this tick, not one each
+  startReadBudget(now)   // ONE deadline for every provider read this tick — caps the tick, not each read
   const samples = loadSamples()
   const last = samples.at(-1)?.t || now - 10 * 60000
   // Every profile that answers is a live login. Pacer never refreshes a token (that is Claude Code's, and rotating
@@ -682,7 +687,7 @@ function printStatus(s) {
 }
 
 // Exported so the retry policy can be tested against a stub server instead of a real provider.
-export { getWithRetry, RETRY_MS, RETRYABLE, ATTEMPT_MS, RETRY_BUDGET_MS, startRetryBudget }
+export { getWithRetry, RETRY_MS, RETRYABLE, ATTEMPT_MS, READ_BUDGET_MS, startReadBudget }
 
 // Run the CLI only when this file IS the entry point, so importing it for a test does not fire a tick.
 // Fail-OPEN: if argv[1] cannot be resolved the CLI still runs, because a guard that silently does nothing
