@@ -8,6 +8,12 @@ swiftc -O -o "$APP/Contents/MacOS/Pacer" Pacer.swift
 mkdir -p "$APP/Contents/Resources"
 [ -f Pacer.icns ] || { swiftc -O -o /tmp/pacer-icon icon.swift && rm -rf Pacer.iconset && mkdir Pacer.iconset && /tmp/pacer-icon Pacer.iconset && iconutil -c icns Pacer.iconset -o Pacer.icns; }
 cp Pacer.icns "$APP/Contents/Resources/Pacer.icns"
+# Derived, never restated: the released version is the tag, so a local build cannot drift from it.
+VERSION="$(git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//')"
+# ð¨ KEEP IN STEP WITH Formula/claude-pacer.rb in dkremsa/homebrew-tap, which writes this same
+# Info.plist for a brew install. One home is impossible — a formula may not write to /Applications or to
+# ~/Library/LaunchAgents, which is most of what this script does — so the two copies name each other instead.
+# They had already drifted: this said CFBundleName "Pacer" while the formula still said "Claude Pacer".
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -17,7 +23,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleDisplayName</key><string>Pacer</string>
   <key>CFBundleExecutable</key><string>Pacer</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.0</string>
+  <key>CFBundleShortVersionString</key><string>${VERSION:-0}</string>
   <key>CFBundleIconFile</key><string>Pacer</string>
   <key>LSUIElement</key><true/>
   <key>LSMinimumSystemVersion</key><string>13.0</string>

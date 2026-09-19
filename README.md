@@ -39,11 +39,13 @@ Every other menu-bar tool shows the percent. Pacer shows the **speed**: where yo
 Requires macOS 13+, Node ≥ 18, Xcode Command Line Tools (`xcode-select --install`), and at least one login from the table below.
 
 ```sh
-# the tap still ships the previous release (Claude only, app named "Claude Pacer")
-brew install dkremsa/tap/claude-pacer
-brew services start claude-pacer          # samples every 10 min, survives reboots
-cp -R "$(brew --prefix)/opt/claude-pacer/Claude Pacer.app" /Applications/ && open "/Applications/Claude Pacer.app"
+brew install dkremsa/tap/pacer
+brew services start pacer                 # samples every 10 min, survives reboots
+cp -R "$(brew --prefix)/opt/pacer/Pacer.app" /Applications/ && open "/Applications/Pacer.app"
 ```
+
+The formula was called `claude-pacer` before v2.0.0. That name still resolves, but an **installed** `claude-pacer`
+does not upgrade across the rename — run `brew uninstall claude-pacer` first.
 
 Or from source: `git clone https://github.com/dkremsa/claude-pacer.git ~/.claude/pacer && cd ~/.claude/pacer && ./build.sh` — compiles the app into `/Applications` and installs a launchd agent that samples every 10 minutes.
 
