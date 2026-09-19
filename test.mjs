@@ -37,12 +37,16 @@ function statusOf(limits) {
 // and a stub would only prove the stub. The waits are shortened in place — the policy under test is the
 // classification, not the length of the backoff, and the real delays would make this a 20-second test.
 {
-  const { getWithRetry, RETRY_MS, ATTEMPT_MS, RETRY_BUDGET_MS } = await import('./pacer.mjs')
-  // Pinned before the waits are blanked below: the retrying this adds, plus one in-flight attempt, has to
-  // stay inside the 45 s that the card's click-to-poll waits for status.json to move. Without this, raising
-  // the backoff to minutes would pass every other test in this file.
-  assert.ok(RETRY_MS.reduce((a, b) => a + b, 0) <= RETRY_BUDGET_MS, 'the backoffs must fit one run budget')
-  assert.ok(RETRY_BUDGET_MS + ATTEMPT_MS <= 45000, `retry budget + one attempt must fit the 45s click-to-poll wait (is ${RETRY_BUDGET_MS + ATTEMPT_MS}ms)`)
+  const { getWithRetry, RETRY_MS, ATTEMPT_MS, READ_BUDGET_MS, startReadBudget } = await import('./pacer.mjs')
+  // Pinned before the waits are blanked below. Every attempt's timeout is clamped to what is left of this,
+  // so it caps the WHOLE read phase however many providers there are — and it has to stay inside the 45 s
+  // the card's click-to-poll waits for status.json to move. Without this, raising either number would pass
+  // every other test in this file.
+  assert.ok(RETRY_MS.reduce((a, b) => a + b, 0) <= READ_BUDGET_MS, 'the backoffs must fit one run budget')
+  assert.ok(ATTEMPT_MS <= READ_BUDGET_MS, 'one attempt must not exceed the whole read budget')
+  // The budget covers only reads that go through getWithRetry. The Antigravity probe runs AFTER it and
+  // spends up to 4s per listening port, so the headroom under the 45s wait has to be stated with it in.
+  assert.ok(READ_BUDGET_MS + 2 * 4000 <= 45000, `the read budget plus the antigravity probe must fit the 45s click-to-poll wait (is ${READ_BUDGET_MS + 8000}ms)`)
   RETRY_MS.length = 0
   RETRY_MS.push(5, 5)
 
@@ -101,6 +105,31 @@ function statusOf(limits) {
     .filter(({ line }) => !/127\.0\.0\.1/.test(line))                                    // local language server
     .filter(({ line }) => !/PROFILE_URL/.test(line))                                      // display name, has a file fallback
   assert.deepEqual(bare.map(b => b.n), [], 'remote read(s) bypassing getWithRetry on line(s): ' + bare.map(b => b.n).join(', '))
+}
+
+// A spent budget stops the reads dead instead of letting each one start a fresh timeout — this is what caps
+// the tick as a whole, and it is the thing that cannot be seen by testing one call in isolation.
+{
+  const { getWithRetry, startReadBudget, READ_BUDGET_MS } = await import('./pacer.mjs')
+  const { createServer } = await import('node:http')
+  let hits = 0
+  const srv = createServer((_, res) => { hits++ })   // accepts, never answers
+  await new Promise(r => srv.listen(0, '127.0.0.1', r))
+  const url = `http://127.0.0.1:${srv.address().port}/`
+  startReadBudget(Date.now() - READ_BUDGET_MS - 1000)   // a tick whose budget ran out a second ago
+  const t0 = Date.now()
+  await assert.rejects(() => getWithRetry(url, {}, 'late'), /read budget spent/)
+  assert.ok(Date.now() - t0 < 500, 'a spent budget must fail fast, not open another 15s timeout')
+  assert.equal(hits, 0, 'and it must not even reach the server')
+
+  // ...and an attempt cannot OUTLIVE the budget either. This is the half that actually caps the tick — the
+  // guard above only catches a budget already spent before the call, so without this the clamp could be
+  // removed and every test here would still pass while eight hung reads went back to 47s, past the 45s wait.
+  startReadBudget(Date.now() - READ_BUDGET_MS + 1500)   // a tick with 1.5s of its budget left
+  const t1 = Date.now()
+  await assert.rejects(() => getWithRetry(url, {}, 'tail'))
+  assert.ok(Date.now() - t1 < 3000, `an attempt must be clamped to the rest of the budget (took ${Date.now() - t1}ms)`)
+  srv.close()
 }
 
 // ── the reset-cycle id (Swift) ───────────────────────────────────────────────────────────────────────────

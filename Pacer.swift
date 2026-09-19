@@ -304,6 +304,8 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     var pollTimer: Timer?
     var resetTimer: Timer?
     var armedFor: Double?
+    var errorPolls = 0            // consecutive failed reads we have already asked about
+    var lastErrorPoll = 0.0
 
     func applicationDidFinishLaunching(_ n: Notification) {
         let holder = NSMenuItem(); holder.view = panel
@@ -352,6 +354,25 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             .compactMap { $0 }.joined(separator: " · ") + " — " + scale
         if !stale { notifyIfNeeded(s) }
         scheduleResetPoll(s)
+        retryFailedRead(s)
+    }
+
+    /// launchd fires the tick on a fixed 600 s interval, so a tick that failed OUTRIGHT — a 429 outliving its
+    /// in-tick retries, the network down — left the figure untouched for a full ten minutes. The app is already
+    /// awake and already re-reading every 60 s, so it is the right place to ask again sooner. The FIRST failure
+    /// is asked about at once (that is the common case — most failures in the log are a single tick), and only a
+    /// run of them backs off: 120 → 240 → 480 → 600 and never further, so a persistently failing endpoint is asked no more often
+    /// than launchd would have asked anyway, so this can add load only while a failure is still new. A read that
+    /// succeeds resets it, and `poll()` kicks the ONE launchd tick rather than sampling separately.
+    func retryFailedRead(_ s: Status) {
+        guard s.error != nil else { errorPolls = 0; return }
+        guard !panel.polling else { return }   // one already in flight: it will refresh us when it lands
+        let now = Date().timeIntervalSince1970
+        let wait = min(600, 60 * pow(2, Double(errorPolls)))
+        guard now - lastErrorPoll >= wait else { return }
+        lastErrorPoll = now
+        errorPolls += 1
+        poll()
     }
 
     /// Claude Code learns of a reset from the headers on its next request; Pacer only samples every 10 minutes.
