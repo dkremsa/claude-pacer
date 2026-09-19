@@ -85,6 +85,12 @@ func countdown(_ hours: Double) -> String {
 /// One ring. A live login shows SPEED (projected % at reset; past 100 = solid red disc). A remembered
 /// one shows what is USED, since nothing is being spent there — and a window that has reset since
 /// draws as a full green outline, which is the signal to switch back.
+/// Identifies a reset CYCLE by the absolute instant it ends — read time plus what is left — so it is constant
+/// within a cycle and jumps by a whole window at a turnover. Never derive this from a countdown: `hoursLeft`
+/// shrinks between reads, which is what let the 90% warning re-arm every ~3 hours. Extracted so a check can
+/// compile it without the app (see test.mjs).
+func cycleId(_ readAtMs: Double, _ hoursLeft: Double) -> Int { Int(readAtMs / 1000 + hoursLeft * 3600) }
+
 func drawRing(_ w: Window?, live: Bool, stale: Bool, center c: NSPoint, radius r: CGFloat, line: CGFloat) {
     let value = live ? (w?.projected ?? 0) : (w?.percent ?? 0)
     if w != nil, !stale, live ? value > 100 : value >= 100 {
@@ -401,11 +407,26 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if over { d.set(true, forKey: "everOver") }
         }
         for w in s.windows {
+            // A cycle is identified by the absolute moment it ENDS, never by how long is LEFT. `hoursLeft`
+            // counts down, so the old id drifted away from the stored one inside a single cycle: once the gap
+            // passed the tolerance it cleared the latch and warned again, every ~3 hours, about a window the
+            // owner had already acknowledged. Read time plus remaining is constant within a cycle (to a few
+            // seconds of jitter between reads) and jumps by the whole window at a real reset, so 10 minutes of
+            // tolerance is far beyond any drift and far short of any genuine turnover.
+            d.removeObject(forKey: "reset:" + w.key)   // the countdown-keyed id this replaced; before the
+            // guard, or an idle window's stale key would sit there until that window next runs
+            guard let h = w.hoursLeft else { continue }   // idle, or reset since the read: nothing to warn about
             let key = "warned90:" + w.key
-            let resetKey = "reset:" + w.key
-            let resetAt = Int((w.hoursLeft ?? 0) * 60) // coarse id of this reset cycle
-            if abs(d.integer(forKey: resetKey) - resetAt) > 180 { d.set(false, forKey: key); d.set(resetAt, forKey: resetKey) }
-            if w.percent >= 90 && !d.bool(forKey: key), let h = w.hoursLeft {
+            let cycleKey = "cycle:" + w.key
+            let endsAt = cycleId(s.t, h)
+            if d.object(forKey: cycleKey) == nil {
+                // First run after the fix: adopt this cycle WITHOUT clearing, or upgrading would fire one
+                // more notification for the very window the old bug had been repeating.
+                d.set(endsAt, forKey: cycleKey)
+            } else if abs(d.integer(forKey: cycleKey) - endsAt) > 600 {
+                d.set(false, forKey: key); d.set(endsAt, forKey: cycleKey)
+            }
+            if w.percent >= 90 && !d.bool(forKey: key) {
                 d.set(true, forKey: key)
                 notify("\(name(w.key)) at \(Int(w.percent))%" + whose, "Resets in " + countdown(h))
             }
