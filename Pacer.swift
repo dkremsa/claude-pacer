@@ -239,7 +239,10 @@ final class PanelView: NSView {
         drawIcon(a.vendor, in: NSRect(x: pad, y: y + 1, width: 16, height: 16))
         if status.hasCost {
             func usd(_ v: Double) -> String { v < 1000 ? String(format: "$%.0f", v) : String(format: "$%.1fk", v / 1000) }
-            text("API-equiv day \(usd(status.costDay)) · week \(usd(status.costWeek)) · month \(usd(status.costMonth))", .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y + 22))
+            // Full names while they fit the card, d / w / m once the figures grow past it.
+            func line(_ d: String, _ w: String, _ m: String) -> NSAttributedString { text("API-equiv \(d) \(usd(status.costDay)) · \(w) \(usd(status.costWeek)) · \(m) \(usd(status.costMonth))", .systemFont(ofSize: 13), mut) }
+            let full = line("day", "week", "month")
+            (full.size().width <= inner ? full : line("d", "w", "m")).draw(at: NSPoint(x: pad, y: y + 22))
         }
         let slots = tabSlots()
         for (i, r) in tabRects().enumerated() {
