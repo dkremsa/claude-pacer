@@ -53,7 +53,7 @@ Or from source: `git clone https://github.com/dkremsa/claude-pacer.git ~/.claude
 
 ## For other tools
 
-`~/.claude/pacer/status.json` is refreshed every 10 minutes: `pace`, `level`, `advice`, `windows[]` (used %, speed, projected, hours left), `cost` (every Claude profile together, rolling `day`/`week`/`month`), `fit` — the rest for the **default** Claude Code login (`acct` names it; it falls to the login used last only when the default one cannot be read) — plus `accounts[]`, the same windows for every account, read at `accountsAt`. When the Claude read fails, `error` and `errorAt` are set and `t` is left alone, so check `t` for freshness before trusting the top-level figures. `node pacer.mjs status` prints the same.
+`~/.claude/pacer/status.json` is refreshed every 10 minutes: `pace`, `level`, `advice`, `windows[]` (used %, speed, projected, hours left), `cost` (every Claude profile together, rolling `day`/`week`/`month`), `fit` — the rest for the **default** Claude Code login (`acct` names it; it falls to the login used last only when the default one cannot be read) — plus `accounts[]`, the same windows for every account with its own `pace`/`level` (same verdict as the top level; a window already at 100% is `red`) and, for Claude, `dir` — the `CLAUDE_CONFIG_DIR` it was read from, `null` for the default login, absent until a tick has read it, read at `accountsAt`. When the Claude read fails, `error` and `errorAt` are set and `t` is left alone, so check `t` for freshness before trusting the top-level figures. `node pacer.mjs status` prints the same.
 
 ## How the number is made
 
