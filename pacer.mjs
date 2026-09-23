@@ -544,7 +544,9 @@ function accountsView(accounts, currentId, samples, now, live, firstId = current
     // Not logged in = nothing is being spent: it lands at reset exactly where it stands now.
     const ws = windows(rolled(a.limits || [], now), hist, now).map(w => current ? w : { ...w, speed: 0, rate: 0, projected: w.percent })
     const advice = a.id === currentId ? advise(ws, hist, null, now) : current ? (advise(ws, hist, null, now) || '').replace(' — no per-model data yet', '') || null : standby(ws)
-    return { id: a.id, provider: a.provider, vendor: a.vendor || VENDOR[a.provider] || a.provider, title: a.title || null, via: a.via || null, email: a.email, plan: a.plan, current, asOf: a.asOf, windows: ws, advice }
+    const { pace, level } = verdict(ws)
+    // `dir` = the CLAUDE_CONFIG_DIR this login was last read from (null = the default ~/.claude); absent = not known yet.
+    return { id: a.id, provider: a.provider, vendor: a.vendor || VENDOR[a.provider] || a.provider, title: a.title || null, via: a.via || null, email: a.email, plan: a.plan, dir: a.dir, current, asOf: a.asOf, windows: ws, pace, level, advice }
   // The Claude login used last leads, so it is the tab the menu bar opens on; your own subscriptions by provider, then what a wrapper resells.
   }).sort((a, b) => ((b.id === firstId) - (a.id === firstId)) || (!!a.via - !!b.via) || (ORDER.indexOf(a.provider) - ORDER.indexOf(b.provider)) || (b.current - a.current) || b.asOf - a.asOf)
 }
@@ -562,16 +564,22 @@ function spendSince(samples, ms, now) {
   }
   return out
 }
+/** THE pace verdict — the top level and every account in `accounts[]` take it from here, and so does anything reading
+ *  status.json (roam): the worst window's projected % at its reset, and a window already used up is red whatever its speed. */
+function verdict(ws) {
+  const live = ws.filter(w => Number.isFinite(w.projected))
+  const worst = live.reduce((a, w) => (!a || w.projected > a.projected) ? w : a, null)
+  const pace = worst ? Math.round(worst.projected) : null
+  const level = pace == null ? 'unknown' : pace > 100 || ws.some(w => w.percent >= 100) ? 'red' : pace > TARGET ? 'amber' : 'green'
+  return { pace, level, worst }
+}
 function buildStatus(limits, all, now, acctId) {
   // Another subscription's samples are not this one's history: its percent is a different counter.
   const samples = all.filter(s => !s.acct || !acctId || s.acct === acctId)
   // Rolled like every account's windows are: a passed reset the server has not turned over yet reads as idle here
   // too, so the top level cannot say 95% while the same login's tab says 0%.
   const ws = windows(rolled(limits, now), samples, now)
-  const live = ws.filter(w => Number.isFinite(w.projected))
-  const worst = live.reduce((a, w) => (!a || w.projected > a.projected) ? w : a, null)
-  const pace = worst ? Math.round(worst.projected) : null
-  const level = pace == null ? 'unknown' : pace > 100 ? 'red' : pace > TARGET ? 'amber' : 'green'
+  const { pace, level, worst } = verdict(ws)
   const fitted = fit(samples)
   const fitCache1 = fit(samples, { cacheReadPrior: 1 })
   return {
@@ -627,7 +635,7 @@ async function tick() {
       const sample = { t: now, acct: l.acct.id, limits: l.limits, tokens: l === head ? tokens : {} }
       appendFileSync(SAMPLES, JSON.stringify(sample) + '\n')
       samples.push(sample)
-      rememberAccount(accounts, { ...l.acct, provider: 'claude', limits: l.limits }, now)
+      rememberAccount(accounts, { ...l.acct, provider: 'claude', limits: l.limits, dir: l.profile.dir }, now)
     }
   }
   const live = {}
