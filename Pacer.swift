@@ -238,9 +238,9 @@ final class PanelView: NSView {
         text((a.title ?? providerNames[a.provider] ?? a.provider.capitalized) + (polling ? " · updating…" : " usage"), .systemFont(ofSize: 15, weight: .bold), .labelColor).draw(at: NSPoint(x: pad + 22, y: y))
         drawIcon(a.vendor, in: NSRect(x: pad, y: y + 1, width: 16, height: 16))
         if status.hasCost {
-            func usd(_ v: Double) -> String { v < 1000 ? String(format: "$%.0f", v) : String(format: "$%.1fk", v / 1000) }
-            // Full names fit while the three figures total 15 characters ("$459 $6.5k $20.8k", "$1.2k $9.9k $30.0k");
-            // one more and the labels shorten to d / w / m.
+            func usd(_ v: Double) -> String { v.rounded() < 1000 ? String(format: "$%.0f", v) : String(format: "$%.1fk", v / 1000) }
+            // Full names fit while the three figures total 15 characters ("$459 $6.5k $20.8k", "$999 $9.9k $99.9k", "$8.8k $8.8k $8.8k"
+            // all draw at <= 296 pt; the card clips near 300). At 16, "$888 $88.8k $88.8k" draws 305 pt, so labels shorten to d / w / m.
             let figs = [status.costDay, status.costWeek, status.costMonth].map(usd)
             let (d, w, m) = figs.joined().count > 15 ? ("d", "w", "m") : ("day", "week", "month")
             text("API-equiv \(d) \(figs[0]) · \(w) \(figs[1]) · \(m) \(figs[2])", .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y + 22))
