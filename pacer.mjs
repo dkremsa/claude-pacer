@@ -679,7 +679,7 @@ async function status() {
 function printStatus(s) {
   console.log(`PACE ${s.pace} (${s.level.toUpperCase()}, worst: ${s.worst})  — ${new Date(s.t).toISOString()}`)
   console.log(`  ${s.advice || 'on pace — nothing to change'}`)
-  console.log(`  API-equivalent cost, all accounts: day $${s.cost.day.total} · week $${s.cost.week.total} · month $${s.cost.month.total} (week: ${Object.entries(s.cost.week.byModel).map(([m, v]) => `${m} $${v}`).join(', ')})`)
+  console.log(`  API-equivalent cost (~/.claude/projects): day $${s.cost.day.total} · week $${s.cost.week.total} · month $${s.cost.month.total} (week: ${Object.entries(s.cost.week.byModel).map(([m, v]) => `${m} $${v}`).join(', ')})`)
   for (const w of s.windows) {
     if (w.idle) { console.log(`  ${w.key.padEnd(20)} ${String(w.percent).padStart(3)}% · idle`); continue }   // no reset yet: nothing to project
     console.log(w.long

@@ -28,7 +28,7 @@ Every other menu-bar tool shows the percent. Pacer shows the **speed**: where yo
 
 - **One sentence of advice.** Computed from your actual model mix: stop/reduce Fable, move X% of Opus work to Sonnet, or do less. "On pace — nothing to change" when you're fine.
 - **Per-model weights measured on your own account.** Anthropic doesn't publish how Opus/Sonnet/Fable count against the limits. Pacer joins the official usage % with your local transcripts and fits the weights from the data (and whether cache reads are discounted). Until there's enough data it uses API price ratios.
-- **API-equivalent cost** over a rolling day, week and 30 days, across every Claude Code profile, so you know what the subscriptions are worth to you.
+- **API-equivalent cost** over a rolling day, week and 30 days, across every Claude Code profile whose transcripts are in `~/.claude/projects` (a `CLAUDE_CONFIG_DIR` profile counts when its `projects` is a symlink there), so you know what the subscriptions are worth to you.
 - **Notifications** when the pace crosses 100, when it comes back, and when any window passes 90%.
 - **Every account, remembered.** Each subscription seen on the machine keeps its last reading. One you are not logged into shows what was used and "last checked"; when its reset passes, that window drops to 0 and its ring turns green — the cue to switch back. Forgotten after a week unseen.
 - **It asks again when a reset is due**, instead of waiting for the next 10-minute sample.
@@ -53,7 +53,7 @@ Or from source: `git clone https://github.com/dkremsa/claude-pacer.git ~/.claude
 
 ## For other tools
 
-`~/.claude/pacer/status.json` is refreshed every 10 minutes: `pace`, `level`, `advice`, `windows[]` (used %, speed, projected, hours left), `cost` (every Claude profile together, rolling `day`/`week`/`month`), `fit` — the rest for the **default** Claude Code login (`acct` names it; it falls to the login used last only when the default one cannot be read) — plus `accounts[]`, the same windows for every account with its own `pace`/`level` (same verdict as the top level; a window already at 100% is `red`) and, for Claude, `dir` — the `CLAUDE_CONFIG_DIR` it was read from, `null` for the default login, absent until a tick has read it, read at `accountsAt`. When the Claude read fails, `error` and `errorAt` are set and `t` is left alone, so check `t` for freshness before trusting the top-level figures. `node pacer.mjs status` prints the same.
+`~/.claude/pacer/status.json` is refreshed every 10 minutes: `pace`, `level`, `advice`, `windows[]` (used %, speed, projected, hours left), `cost` (all transcripts under `~/.claude/projects`, rolling `day`/`week`/`month`), `fit` — the rest for the **default** Claude Code login (`acct` names it; it falls to the login used last only when the default one cannot be read) — plus `accounts[]`, the same windows for every account with its own `pace`/`level` (same verdict as the top level; a window already at 100% is `red`) and, for Claude, `dir` — the `CLAUDE_CONFIG_DIR` it was read from, `null` for the default login, absent until a tick has read it, read at `accountsAt`. When the Claude read fails, `error` and `errorAt` are set and `t` is left alone, so check `t` for freshness before trusting the top-level figures. `node pacer.mjs status` prints the same.
 
 ## How the number is made
 
