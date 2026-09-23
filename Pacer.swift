@@ -20,7 +20,7 @@ struct Status {
     var stamp: Double = 0   // moves on EVERY tick, failed ones included (`t` deliberately does not)
     var accountsT: Double = 0   // when `accounts` were read; differs from `t` only while the Claude read is failing
     var nextReset: Double?   // epoch seconds of the soonest reset among live logins
-    var advice: String?; var costDay = 0.0; var costWeek = 0.0
+    var advice: String?; var costDay = 0.0; var costWeek = 0.0; var costMonth = 0.0; var hasCost = false
 }
 
 func loadStatus() -> Status {
@@ -37,6 +37,8 @@ func loadStatus() -> Status {
     if let c = j["cost"] as? [String: Any] {
         s.costDay = (c["day"] as? [String: Any])?["total"] as? Double ?? 0
         s.costWeek = (c["week"] as? [String: Any])?["total"] as? Double ?? 0
+        s.costMonth = (c["month"] as? [String: Any])?["total"] as? Double ?? 0
+        s.hasCost = true
     }
     func window(_ w: [String: Any]) -> Window {
         Window(key: w["key"] as? String ?? "", percent: w["percent"] as? Double ?? 0, projected: w["projected"] as? Double ?? 0,
@@ -194,10 +196,12 @@ final class PanelView: NSView {
         }
         return out
     }
+    /// The API-equivalent line sits under the title, above the tabs: it counts every Claude profile, so it belongs to no tab.
+    private var costH: CGFloat { status.hasCost ? 20 : 0 }
     private var tabRows: Int { status.accounts.count > 1 ? (tabSlots().last?.0 ?? 0) + 1 : 0 }
     private func tabRects() -> [NSRect] {
         guard status.accounts.count > 1 else { return [] }
-        return tabSlots().map { NSRect(x: pad - 4 + CGFloat($0.1) * (tabW + tabGap), y: 40 + CGFloat($0.0) * 28, width: tabW, height: 22) }
+        return tabSlots().map { NSRect(x: pad - 4 + CGFloat($0.1) * (tabW + tabGap), y: 40 + costH + CGFloat($0.0) * 28, width: tabW, height: 22) }
     }
     private func title(_ key: String) -> String {
         if key == "session" { return "Session (5h)" }
@@ -215,11 +219,11 @@ final class PanelView: NSView {
     }
     private func adviceHeight(_ a: Account) -> CGFloat { ceil(advice(a).boundingRect(with: NSSize(width: inner, height: 400), options: [.usesLineFragmentOrigin]).height) }
     private func isStale(_ a: Account) -> Bool { !a.current || Date().timeIntervalSince1970 * 1000 - a.asOf > staleAfterMs }
-    /// Cost (the live Claude login only), who, and — when the reading is not live — when it was taken.
-    private func footerLines(_ a: Account) -> Int { (a.id == status.accounts.first?.id ? 1 : 0) + 1 + (isStale(a) ? 1 : 0) }
+    /// Who, and — when the reading is not live — when it was taken.
+    private func footerLines(_ a: Account) -> Int { 1 + (isStale(a) ? 1 : 0) }
     /// The tallest account sets the height, so switching tabs never resizes an open menu.
     private func layoutPanel() {
-        let fixed: CGFloat = 36 + CGFloat(tabRows) * 28 + (status.error != nil ? 22 : 0) + adviceGap + 10 + 1 + 9 + 8
+        let fixed: CGFloat = 36 + costH + CGFloat(tabRows) * 28 + (status.error != nil ? 22 : 0) + adviceGap + 10 + 1 + 9 + 8
         let h: CGFloat = status.accounts.map { (a: Account) -> CGFloat in fixed + CGFloat(a.windows.count) * 55 + adviceHeight(a) + CGFloat(footerLines(a)) * 18 }.max() ?? 100
         setFrameSize(NSSize(width: PanelView.width, height: h)); needsDisplay = true
     }
@@ -233,6 +237,9 @@ final class PanelView: NSView {
         var y: CGFloat = 12
         text((a.title ?? providerNames[a.provider] ?? a.provider.capitalized) + (polling ? " · updating…" : " usage"), .systemFont(ofSize: 15, weight: .bold), .labelColor).draw(at: NSPoint(x: pad + 22, y: y))
         drawIcon(a.vendor, in: NSRect(x: pad, y: y + 1, width: 16, height: 16))
+        if status.hasCost {
+            text(String(format: "API-equiv  day $%.0f · week $%.0f · month $%.0f", status.costDay, status.costWeek, status.costMonth), .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y + 22))
+        }
         let slots = tabSlots()
         for (i, r) in tabRects().enumerated() {
             let t = status.accounts[i]
@@ -245,7 +252,7 @@ final class PanelView: NSView {
                 NSColor.separatorColor.setFill(); NSRect(x: r.maxX + tabGap / 2, y: r.minY + 4, width: 1, height: r.height - 8).fill()
             }
         }
-        y += 24 + CGFloat(tabRows) * 28
+        y += 24 + costH + CGFloat(tabRows) * 28
         if let e = status.error { text("⚠︎ " + e, .systemFont(ofSize: 12), .systemOrange).draw(at: NSPoint(x: pad, y: y)); y += 22 }
         let num = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
         for w in a.windows {
@@ -281,10 +288,6 @@ final class PanelView: NSView {
         PanelView.scrim.setFill()
         NSBezierPath(roundedRect: NSRect(x: pad - 6, y: sepY + 4, width: inner + 12, height: bounds.height - sepY - 8), xRadius: 7, yRadius: 7).fill()
         y = sepY + 10
-        if a.id == status.accounts.first?.id {
-            text(String(format: "API-equiv $%.0f today · $%.0f this week", status.costDay, status.costWeek), .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y))
-            y += 18
-        }
         // The dot says whether this is a live login, so no line is spent on saying it.
         (a.current ? NSColor.systemGreen : NSColor.tertiaryLabelColor).setFill()
         NSBezierPath(ovalIn: NSRect(x: pad, y: y + 5, width: 7, height: 7)).fill()
