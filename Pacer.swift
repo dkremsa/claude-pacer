@@ -238,7 +238,8 @@ final class PanelView: NSView {
         text((a.title ?? providerNames[a.provider] ?? a.provider.capitalized) + (polling ? " · updating…" : " usage"), .systemFont(ofSize: 15, weight: .bold), .labelColor).draw(at: NSPoint(x: pad + 22, y: y))
         drawIcon(a.vendor, in: NSRect(x: pad, y: y + 1, width: 16, height: 16))
         if status.hasCost {
-            text(String(format: "API-equiv  day $%.0f · week $%.0f · month $%.0f", status.costDay, status.costWeek, status.costMonth), .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y + 22))
+            func usd(_ v: Double) -> String { v < 1000 ? String(format: "$%.0f", v) : String(format: "$%.1fk", v / 1000) }
+            text("API-equiv day \(usd(status.costDay)) · week \(usd(status.costWeek)) · month \(usd(status.costMonth))", .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y + 22))
         }
         let slots = tabSlots()
         for (i, r) in tabRects().enumerated() {
