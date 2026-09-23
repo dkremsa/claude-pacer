@@ -239,10 +239,11 @@ final class PanelView: NSView {
         drawIcon(a.vendor, in: NSRect(x: pad, y: y + 1, width: 16, height: 16))
         if status.hasCost {
             func usd(_ v: Double) -> String { v < 1000 ? String(format: "$%.0f", v) : String(format: "$%.1fk", v / 1000) }
-            // Full names fit up to "$999 · $9.9k · $99.9k"; past any of those the labels shorten to d / w / m.
-            let short = status.costDay >= 1000 || status.costWeek >= 10000 || status.costMonth >= 100000
-            let (d, w, m) = short ? ("d", "w", "m") : ("day", "week", "month")
-            text("API-equiv \(d) \(usd(status.costDay)) · \(w) \(usd(status.costWeek)) · \(m) \(usd(status.costMonth))", .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y + 22))
+            // Full names fit while the three figures total 15 characters ("$459 $6.5k $20.8k", "$1.2k $9.9k $30.0k");
+            // one more and the labels shorten to d / w / m.
+            let figs = [status.costDay, status.costWeek, status.costMonth].map(usd)
+            let (d, w, m) = figs.joined().count > 15 ? ("d", "w", "m") : ("day", "week", "month")
+            text("API-equiv \(d) \(figs[0]) · \(w) \(figs[1]) · \(m) \(figs[2])", .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad, y: y + 22))
         }
         let slots = tabSlots()
         for (i, r) in tabRects().enumerated() {
