@@ -550,6 +550,7 @@ function accountsView(accounts, currentId, samples, now, live, firstId = current
 }
 
 // ---------------------------------------------------------------- status
+const DAY_MS = 24 * 3600000
 function spendSince(samples, ms, now) {
   const out = {}
   for (const s of samples) {
@@ -561,7 +562,6 @@ function spendSince(samples, ms, now) {
   }
   return out
 }
-function weekMs(ws, now) { const w = ws.find(x => x.kind === 'weekly_all'); return w ? Math.max(0, WINDOW_MIN.weekly_all * 60000 - w.minutesLeft * 60000) : 7 * 24 * 3600000 }
 function buildStatus(limits, all, now, acctId) {
   // Another subscription's samples are not this one's history: its percent is a different counter.
   const samples = all.filter(s => !s.acct || !acctId || s.acct === acctId)
@@ -580,8 +580,9 @@ function buildStatus(limits, all, now, acctId) {
     windows: ws,
     resets: observedResets(samples),
     spend24h: spendSince(samples, 24 * 3600000, now),
-    // What the same tokens would have cost on the API: today, and since the week window opened (as far back as samples go).
-    cost: { day: costOf(spendSince(samples, 24 * 3600000, now)), week: costOf(spendSince(samples, weekMs(ws, now), now)), since: samples[0]?.t || now },
+    // What the same tokens would have cost on the API over rolling 1/7/30 days. Read from ALL samples, not this login's:
+    // transcripts are shared between profiles, so the tokens were never one account's (they ride on one sample per tick).
+    cost: { day: costOf(spendSince(all, DAY_MS, now)), week: costOf(spendSince(all, 7 * DAY_MS, now)), month: costOf(spendSince(all, 30 * DAY_MS, now)), since: all[0]?.t || now },
     fit: fitted,
     // Same fit with cache reads at full price: whichever residual is lower says how the limit treats cache.
     fitCacheFull: fitCache1.enough ? { residual: fitCache1.residual, relative: fitCache1.relative } : null,
@@ -670,7 +671,7 @@ async function status() {
 function printStatus(s) {
   console.log(`PACE ${s.pace} (${s.level.toUpperCase()}, worst: ${s.worst})  — ${new Date(s.t).toISOString()}`)
   console.log(`  ${s.advice || 'on pace — nothing to change'}`)
-  console.log(`  API-equivalent cost: today $${s.cost.day.total} · this week $${s.cost.week.total} (${Object.entries(s.cost.week.byModel).map(([m, v]) => `${m} $${v}`).join(', ')})`)
+  console.log(`  API-equivalent cost, all accounts: day $${s.cost.day.total} · week $${s.cost.week.total} · month $${s.cost.month.total} (week: ${Object.entries(s.cost.week.byModel).map(([m, v]) => `${m} $${v}`).join(', ')})`)
   for (const w of s.windows) {
     if (w.idle) { console.log(`  ${w.key.padEnd(20)} ${String(w.percent).padStart(3)}% · idle`); continue }   // no reset yet: nothing to project
     console.log(w.long
