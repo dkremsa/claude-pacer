@@ -8,17 +8,7 @@ Two rings in the macOS menu bar that tell you whether your AI coding subscriptio
 
 Click it:
 
-```
-✳ Claude usage
-✳ ●●  │  ✳ ○○  │  ❀ ●◐            ← one tab per account: its mark and its two rings
-Session (5h)              44%  speed 54
-Week · all models         16%  speed 133
-Week · Fable              12%  speed 116
-To fit the week: use Fable about 58% less
-
-API-equiv $62 today · $410 this week
-● you@example.com · Max 20x
-```
+<img src="docs/card.png" width="320" alt="The Pacer card: session and week speed for a Claude login, with the advice to use Fable less"> <img src="docs/tabs.gif" width="320" alt="Switching tabs between two Claude logins, Codex and Gemini via Antigravity">
 
 Click a tab to see that account, and the menu bar follows it — the rings up there and the card always mean the same subscription. Click anywhere else on the card to sample now.
 
