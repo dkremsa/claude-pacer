@@ -41,6 +41,18 @@ Or from source: `git clone https://github.com/dkremsa/claude-pacer.git ~/.claude
 
 **Start at login:** System Settings → General → Login Items & Extensions → **+** → pick **Pacer** from Applications. The sampler already runs at boot; this is for the menu-bar icon.
 
+## Reminders
+
+A reminder to start a Claude Code session later — set it now, paste it when you are ready:
+
+```
+pacer remind add 2026-10-13T09:00 "Ads check" "check the ads spend and promo credit" --dir ~/code/site --flags --chrome
+pacer remind list
+pacer remind done <id>
+```
+
+When one falls due Pacer posts a notification; clicking it copies `cd <dir> && claude <flags> '<prompt>'` to the clipboard. Nothing runs on its own. Due and upcoming reminders are also listed in the menu, each with **Copy command** and **Done**. They are kept in `~/.claude/pacer/reminders.json`.
+
 ## For other tools
 
 `~/.claude/pacer/status.json` is refreshed every 10 minutes: `pace`, `level`, `advice`, `windows[]` (used %, speed, projected, hours left), `cost` (all transcripts under `~/.claude/projects`, rolling `day`/`week`/`month`), `fit` — the rest for the **default** Claude Code login (`acct` names it; it falls to the login used last only when the default one cannot be read) — plus `accounts[]`, the same windows for every account with its own `pace`/`level` (same verdict as the top level; a window already at 100% is `red`) and, for Claude, `dir` — the `CLAUDE_CONFIG_DIR` it was read from, `null` for the default login, absent until a tick has read it, read at `accountsAt`. When the Claude read fails, `error` and `errorAt` are set and `t` is left alone, so check `t` for freshness before trusting the top-level figures. `node pacer.mjs status` prints the same.

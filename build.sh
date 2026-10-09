@@ -29,6 +29,9 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>LSMinimumSystemVersion</key><string>13.0</string>
 </dict></plist>
 PLIST
+# Sign the whole bundle (ad hoc) so it carries the bundle id: the reminder notifications go through the
+# notification centre, which keys permission on that id — the linker's own signature names only "Pacer".
+codesign --force --sign - "$APP"
 NODE="$(command -v node)"
 # launchd gives a job only the system PATH. The Copilot reader shells out to `gh`, so its directory is derived
 # from where gh actually is (Homebrew, nix, MacPorts…) rather than guessed.

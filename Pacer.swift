@@ -2,9 +2,11 @@
 // (written by `pacer.mjs tick`, launchd every 10 min). Menu bar = two speed rings (session, week);
 // speed = projected percent at reset, 100 = you run out exactly at reset. Build: ./build.sh
 import Cocoa
+import UserNotifications
 
 let dir = NSString(string: "~/.claude/pacer").expandingTildeInPath
 let statusPath = dir + "/status.json"
+let remindersPath = dir + "/reminders.json"   // written by `pacer remind`
 /// Past this a reading is not live: grey rings, "last checked". `pacer.mjs status` uses the same 30 minutes.
 let staleAfterMs: Double = 30 * 60 * 1000
 
@@ -73,6 +75,22 @@ func loadStatus() -> Status {
     if s.accounts.isEmpty { s.accounts = [Account(id: "", provider: "claude", vendor: "claude", title: nil, via: nil, email: nil, plan: nil, current: true, asOf: s.t, windows: s.windows, advice: s.advice)] }
     return s
 }
+
+struct Reminder { let id: String; let at: Double; let title: String; let prompt: String; let dir: String; let flags: String }
+func loadReminders() -> [Reminder] {
+    guard let data = FileManager.default.contents(atPath: remindersPath),
+          let j = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
+    return j.compactMap { r in
+        guard let id = r["id"] as? String, let at = r["at"] as? Double, let title = r["title"] as? String, let prompt = r["prompt"] as? String else { return nil }
+        return Reminder(id: id, at: at, title: title, prompt: prompt, dir: r["dir"] as? String ?? NSHomeDirectory(), flags: r["flags"] as? String ?? "")
+    }
+}
+/// What a click copies: the session to start, pasted by hand when the owner is ready — Pacer never runs it.
+func command(_ r: Reminder) -> String {
+    let q = { (x: String) in "'" + x.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+    return "cd \(q(r.dir)) && claude " + (r.flags.isEmpty ? "" : r.flags + " ") + q(r.prompt)
+}
+func copyToPasteboard(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
 
 func levelColor(_ projected: Double) -> NSColor { projected > 100 ? .systemRed : projected > 80 ? .systemOrange : .systemGreen }
 func usedColor(_ percent: Double) -> NSColor { percent >= 90 ? .systemRed : percent >= 70 ? .systemOrange : .systemGreen }
@@ -305,7 +323,7 @@ final class PanelView: NSView {
     }
 }
 
-final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     let menu = NSMenu()
     let panel = PanelView(frame: NSRect(x: 0, y: 0, width: PanelView.width, height: 100))
@@ -322,13 +340,69 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(NSMenuItem(title: "Quit Pacer", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         menu.delegate = self
         item.menu = menu
+        // Reminders post through the notification centre, not osascript: only a notification the app owns
+        // tells the app it was clicked, and the click is what copies the command.
+        UNUserNotificationCenter.current().delegate = self
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         panel.onClick = { [weak self] in self?.poll() }
         panel.onSelect = { [weak self] in self?.refresh() }   // the icon follows the tab
         refresh()
         let t = Timer(timeInterval: 60, repeats: true) { _ in self.refresh() }
         RunLoop.main.add(t, forMode: .common)
     }
-    func menuWillOpen(_ menu: NSMenu) { refresh() }
+    func menuWillOpen(_ menu: NSMenu) { refresh(); listReminders() }
+
+    let reminderTag = 7
+    /// One row per reminder between the card and Quit; its submenu copies the command or clears it.
+    func listReminders() {
+        for i in menu.items.filter({ $0.tag == reminderTag }) { menu.removeItem(i) }
+        let rs = loadReminders()
+        guard !rs.isEmpty else { return }
+        let df = DateFormatter(); df.dateFormat = "EEE MMM d, HH:mm"
+        let now = Date().timeIntervalSince1970 * 1000
+        var at = 2   // after the card and its separator
+        for r in rs {
+            let row = NSMenuItem(title: "⏰ " + r.title + " — " + (r.at <= now ? "due" : df.string(from: Date(timeIntervalSince1970: r.at / 1000))), action: nil, keyEquivalent: "")
+            row.tag = reminderTag
+            let sub = NSMenu()
+            let copy = NSMenuItem(title: "Copy command", action: #selector(copyReminder(_:)), keyEquivalent: ""); copy.target = self; copy.representedObject = r.id
+            let done = NSMenuItem(title: "Done", action: #selector(doneReminder(_:)), keyEquivalent: ""); done.target = self; done.representedObject = r.id
+            sub.addItem(copy); sub.addItem(done); row.submenu = sub
+            menu.insertItem(row, at: at); at += 1
+        }
+        let sep = NSMenuItem.separator(); sep.tag = reminderTag
+        menu.insertItem(sep, at: at)
+    }
+    @objc func copyReminder(_ m: NSMenuItem) {
+        if let r = loadReminders().first(where: { $0.id == m.representedObject as? String }) { copyToPasteboard(command(r)) }
+    }
+    @objc func doneReminder(_ m: NSMenuItem) {
+        guard let id = m.representedObject as? String, let data = FileManager.default.contents(atPath: remindersPath),
+              let j = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let out = try? JSONSerialization.data(withJSONObject: j.filter { $0["id"] as? String != id }, options: [.prettyPrinted]) else { return }
+        FileManager.default.createFile(atPath: remindersPath, contents: out)
+        UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
+    }
+    /// Each reminder notifies once, when it falls due; the dropdown keeps it until Done.
+    func notifyDueReminders() {
+        let d = UserDefaults.standard, now = Date().timeIntervalSince1970 * 1000
+        for r in loadReminders() where r.at <= now && !d.bool(forKey: "reminded:" + r.id) {
+            d.set(true, forKey: "reminded:" + r.id)
+            let c = UNMutableNotificationContent()
+            c.title = r.title + " is due"; c.body = "Click to copy the command, then paste it in a terminal."
+            c.sound = .default; c.userInfo = ["command": command(r)]
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: r.id, content: c, trigger: nil))
+        }
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler done: @escaping () -> Void) {
+        if let cmd = response.notification.request.content.userInfo["command"] as? String {
+            copyToPasteboard(cmd)
+            let c = UNMutableNotificationContent(); c.title = "Copied"; c.body = "Paste it in a terminal when you are ready."
+            center.add(UNNotificationRequest(identifier: UUID().uuidString, content: c, trigger: nil))
+        }
+        done()
+    }
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent n: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) { done([.banner, .list, .sound]) }
 
     /// Two rings, session then week, for the account whose TAB is open — the tab outlives the menu, so the
     /// menu bar and the card say the same thing rather than the icon silently meaning a different subscription.
@@ -361,6 +435,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
         item.button?.toolTip = [shown?.title ?? providerNames[shown?.provider ?? "claude"], shown?.email]
             .compactMap { $0 }.joined(separator: " · ") + " — " + scale
         if !stale { notifyIfNeeded(s) }
+        notifyDueReminders()
         scheduleResetPoll(s)
         retryFailedRead(s)
     }

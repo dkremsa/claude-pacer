@@ -5,6 +5,9 @@
  *   pacer tick     sample the usage API + local transcripts, append to samples.jsonl, write status.json
  *   pacer status   print the current status (and refresh it from stored samples only — no network)
  *   pacer fit      show the fitted per-model weights and the data behind them
+ *   pacer remind add <when> <title> <prompt> [--dir <path>] [--flags '<claude flags>']   a reminder the app
+ *                  notifies about when due; clicking it copies `cd <dir> && claude <flags> '<prompt>'` to paste when ready
+ *   pacer remind list | done <id>
  *
  * Two data sources, joined here for the first time:
  *   1. https://api.anthropic.com/api/oauth/usage — server truth, percent per window, no breakdown.
@@ -28,6 +31,7 @@ const DIR = join(homedir(), '.claude', 'pacer')
 const SAMPLES = join(DIR, 'samples.jsonl')
 const STATUS = join(DIR, 'status.json')
 const ACCOUNTS = join(DIR, 'accounts.json')
+const REMINDERS = join(DIR, 'reminders.json')   // Pacer.swift reads the same file
 const CODEX = join(homedir(), '.codex')
 const FORGET_AFTER = 7 * 24 * 3600000   // an account not seen for a week drops off
 const PROJECTS = join(homedir(), '.claude', 'projects')
@@ -695,6 +699,27 @@ function printStatus(s) {
   for (const [k, ts] of Object.entries(s.resets)) console.log(`  observed resets ${k}: ` + ts.map(t => new Date(t).toISOString().slice(0, 16)).join(', '))
 }
 
+// ---------------------------------------------------------------- reminders
+const loadReminders = () => existsSync(REMINDERS) ? JSON.parse(readFileSync(REMINDERS, 'utf8')) : []
+function remind(args) {
+  const list = loadReminders(), [sub, ...rest] = args
+  if (sub === 'add') {
+    const opt = (name, dflt) => { const i = rest.indexOf(name); return i >= 0 ? rest.splice(i, 2)[1] : dflt }
+    const dir = opt('--dir', process.cwd()), flags = opt('--flags', '')
+    const [when, title, prompt] = rest, at = Date.parse(when)
+    if (!title || !prompt || Number.isNaN(at)) { console.log("usage: pacer remind add <when, e.g. 2026-10-13T09:00> <title> <prompt> [--dir <path>] [--flags '<claude flags>']"); process.exit(1) }
+    const r = { id: Math.random().toString(36).slice(2, 8), at, title, prompt, dir, flags }
+    writeFileSync(REMINDERS, JSON.stringify([...list, r].sort((a, b) => a.at - b.at), null, 2))
+    console.log(`${r.id}  ${new Date(at).toLocaleString()}  ${title}`)
+  } else if (sub === 'done') {
+    const left = list.filter(r => r.id !== rest[0])
+    if (left.length === list.length) { console.log(`no reminder ${rest[0]}`); process.exit(1) }
+    writeFileSync(REMINDERS, JSON.stringify(left, null, 2))
+  } else if (sub === 'list' || !sub) {
+    for (const r of list) console.log(`${r.id}  ${new Date(r.at).toLocaleString()}${r.at <= Date.now() ? ' (due)' : ''}  ${r.title}  — ${r.dir}`)
+  } else { console.log('usage: pacer remind add|list|done'); process.exit(1) }
+}
+
 // Exported so the retry policy can be tested against a stub server instead of a real provider.
 export { getWithRetry, RETRY_MS, RETRYABLE, ATTEMPT_MS, READ_BUDGET_MS, startReadBudget }
 
@@ -708,5 +733,6 @@ if (isMain) {
   if (cmd === 'tick') await tick()
   else if (cmd === 'status') await status()
   else if (cmd === 'fit') { const s = loadSamples(); console.log(JSON.stringify({ prior: fit(s), cacheFull: fit(s, { cacheReadPrior: 1 }) }, null, 2)) }
-  else { console.log('usage: pacer tick|status|fit'); process.exit(1) }
+  else if (cmd === 'remind') remind(process.argv.slice(3))
+  else { console.log('usage: pacer tick|status|fit|remind'); process.exit(1) }
 }
