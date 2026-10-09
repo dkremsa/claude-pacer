@@ -76,19 +76,35 @@ func loadStatus() -> Status {
     return s
 }
 
-struct Reminder { let id: String; let at: Double; let title: String; let prompt: String; let dir: String; let flags: String }
+struct Reminder { let id: String; let at: Double; let title: String; let prompt: String; let dir: String; let flags: String; let every: String? }
 func loadReminders() -> [Reminder] {
     guard let data = FileManager.default.contents(atPath: remindersPath),
           let j = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
     return j.compactMap { r in
         guard let id = r["id"] as? String, let at = r["at"] as? Double, let title = r["title"] as? String, let prompt = r["prompt"] as? String else { return nil }
-        return Reminder(id: id, at: at, title: title, prompt: prompt, dir: r["dir"] as? String ?? NSHomeDirectory(), flags: r["flags"] as? String ?? "")
+        return Reminder(id: id, at: at, title: title, prompt: prompt, dir: r["dir"] as? String ?? NSHomeDirectory(), flags: r["flags"] as? String ?? "", every: r["every"] as? String)
     }
 }
 /// What a click copies: the session to start, pasted by hand when the owner is ready — Pacer never runs it.
 func command(_ r: Reminder) -> String {
     let q = { (x: String) in "'" + x.replacingOccurrences(of: "'", with: "'\\''") + "'" }
     return "cd \(q(r.dir)) && claude " + (r.flags.isEmpty ? "" : r.flags + " ") + q(r.prompt)
+}
+/// A recurring reminder's next date after `now`: occurrences missed while the Mac slept are skipped, not replayed.
+func nextDate(_ atMs: Double, _ every: String, after now: Date) -> Double? {
+    let unit: Calendar.Component? = ["day": .day, "week": .weekOfYear, "month": .month][every]
+    guard let unit else { return nil }
+    var d = Date(timeIntervalSince1970: atMs / 1000), n = 1
+    let start = d
+    while d <= now { guard let x = Calendar.current.date(byAdding: unit, value: n, to: start) else { return nil }; d = x; n += 1 }
+    return d.timeIntervalSince1970 * 1000
+}
+/// Rewrites one reminder in reminders.json (nil = remove it); the CLI is the file's other writer.
+func updateReminder(_ id: String, _ change: ([String: Any]) -> [String: Any]?) {
+    guard let data = FileManager.default.contents(atPath: remindersPath),
+          let j = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+          let out = try? JSONSerialization.data(withJSONObject: j.compactMap { $0["id"] as? String == id ? change($0) : $0 }, options: [.prettyPrinted]) else { return }
+    FileManager.default.createFile(atPath: remindersPath, contents: out)
 }
 func copyToPasteboard(_ text: String) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string) }
 
@@ -377,17 +393,17 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         if let r = loadReminders().first(where: { $0.id == m.representedObject as? String }) { copyToPasteboard(command(r)) }
     }
     @objc func doneReminder(_ m: NSMenuItem) {
-        guard let id = m.representedObject as? String, let data = FileManager.default.contents(atPath: remindersPath),
-              let j = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
-              let out = try? JSONSerialization.data(withJSONObject: j.filter { $0["id"] as? String != id }, options: [.prettyPrinted]) else { return }
-        FileManager.default.createFile(atPath: remindersPath, contents: out)
+        guard let id = m.representedObject as? String else { return }
+        updateReminder(id) { _ in nil }
         UNUserNotificationCenter.current().removeDeliveredNotifications(withIdentifiers: [id])
     }
-    /// Each reminder notifies once, when it falls due; the dropdown keeps it until Done.
+    /// Each reminder notifies once, when it falls due; the dropdown keeps it until Done. A recurring one
+    /// moves to its next date as it fires, so the latch is per occurrence.
     func notifyDueReminders() {
         let d = UserDefaults.standard, now = Date().timeIntervalSince1970 * 1000
-        for r in loadReminders() where r.at <= now && !d.bool(forKey: "reminded:" + r.id) {
-            d.set(true, forKey: "reminded:" + r.id)
+        for r in loadReminders() where r.at <= now && !d.bool(forKey: "reminded:\(r.id):\(Int(r.at))") {
+            d.set(true, forKey: "reminded:\(r.id):\(Int(r.at))")
+            if let every = r.every, let next = nextDate(r.at, every, after: Date()) { updateReminder(r.id) { var x = $0; x["at"] = next; return x } }
             let c = UNMutableNotificationContent()
             c.title = r.title + " is due"; c.body = "Click to copy the command, then paste it in a terminal."
             c.sound = .default; c.userInfo = ["command": command(r)]

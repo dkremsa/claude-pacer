@@ -47,11 +47,12 @@ A reminder to start a Claude Code session later — set it now, paste it when yo
 
 ```
 pacer remind add 2026-10-13T09:00 "Ads check" "check the ads spend and promo credit" --dir ~/code/site --flags --chrome
+pacer remind add 2026-10-13T09:00 "Weekly review" "summarise last week's commits" --every week
 pacer remind list
 pacer remind done <id>
 ```
 
-When one falls due Pacer posts a notification; clicking it copies `cd <dir> && claude <flags> '<prompt>'` to the clipboard. Nothing runs on its own. Due and upcoming reminders are also listed in the menu, each with **Copy command** and **Done**. They are kept in `~/.claude/pacer/reminders.json`.
+When one falls due Pacer posts a notification; clicking it copies `cd <dir> && claude <flags> '<prompt>'` to the clipboard. Nothing runs on its own. `--every day|week|month` makes it recurring: when it fires it moves to its next date, skipping any it missed while the Mac was asleep; **Done** removes it for good. Due and upcoming reminders are also listed in the menu, each with **Copy command** and **Done**. They are kept in `~/.claude/pacer/reminders.json`.
 
 ## For other tools
 
