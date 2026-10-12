@@ -76,13 +76,13 @@ func loadStatus() -> Status {
     return s
 }
 
-struct Reminder { let id: String; let at: Double; let title: String; let prompt: String; let dir: String; let flags: String; let every: String? }
+struct Reminder { let id: String; let at: Double; let title: String; let prompt: String; let dir: String; let flags: String; let every: String?; let left: Int? }
 func loadReminders() -> [Reminder] {
     guard let data = FileManager.default.contents(atPath: remindersPath),
           let j = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [] }
     return j.compactMap { r in
         guard let id = r["id"] as? String, let at = r["at"] as? Double, let title = r["title"] as? String, let prompt = r["prompt"] as? String else { return nil }
-        return Reminder(id: id, at: at, title: title, prompt: prompt, dir: r["dir"] as? String ?? NSHomeDirectory(), flags: r["flags"] as? String ?? "", every: r["every"] as? String)
+        return Reminder(id: id, at: at, title: title, prompt: prompt, dir: r["dir"] as? String ?? NSHomeDirectory(), flags: r["flags"] as? String ?? "", every: r["every"] as? String, left: r["left"] as? Int)
     }
 }
 /// What a click copies: the session to start, pasted by hand when the owner is ready — Pacer never runs it.
@@ -403,7 +403,10 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         let d = UserDefaults.standard, now = Date().timeIntervalSince1970 * 1000
         for r in loadReminders() where r.at <= now && !d.bool(forKey: "reminded:\(r.id):\(Int(r.at))") {
             d.set(true, forKey: "reminded:\(r.id):\(Int(r.at))")
-            if let every = r.every, let next = nextDate(r.at, every, after: Date()) { updateReminder(r.id) { var x = $0; x["at"] = next; return x } }
+            // `left` (from `pacer remind add --times N`) counts this occurrence too: the last one stays put until Done.
+            if let every = r.every, (r.left ?? 2) > 1, let next = nextDate(r.at, every, after: Date()) {
+                updateReminder(r.id) { var x = $0; x["at"] = next; if let l = r.left { x["left"] = l - 1 }; return x }
+            }
             let c = UNMutableNotificationContent()
             c.title = r.title + " is due"; c.body = "Click to copy the command, then paste it in a terminal."
             c.sound = .default; c.userInfo = ["command": command(r)]

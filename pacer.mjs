@@ -5,7 +5,7 @@
  *   pacer tick     sample the usage API + local transcripts, append to samples.jsonl, write status.json
  *   pacer status   print the current status (and refresh it from stored samples only — no network)
  *   pacer fit      show the fitted per-model weights and the data behind them
- *   pacer remind add <when> <title> <prompt> [--dir <path>] [--flags '<claude flags>'] [--every day|week|month]
+ *   pacer remind add <when> <title> <prompt> [--dir <path>] [--flags '<claude flags>'] [--every day|week|month [--times N]]
  *                  a reminder the app notifies about when due; clicking it copies `cd <dir> && claude <flags> '<prompt>'`
  *                  to paste when ready. A recurring one moves to its next date when it fires (Pacer.swift `nextDate`)
  *   pacer remind list | done <id>
@@ -706,18 +706,19 @@ function remind(args) {
   const list = loadReminders(), [sub, ...rest] = args
   if (sub === 'add') {
     const opt = (name, dflt) => { const i = rest.indexOf(name); return i >= 0 ? rest.splice(i, 2)[1] : dflt }
-    const dir = opt('--dir', process.cwd()), flags = opt('--flags', ''), every = opt('--every')
-    const [when, title, prompt] = rest, at = Date.parse(when)
-    if (!title || !prompt || Number.isNaN(at) || (every && !['day', 'week', 'month'].includes(every))) { console.log("usage: pacer remind add <when, e.g. 2026-10-13T09:00> <title> <prompt> [--dir <path>] [--flags '<claude flags>'] [--every day|week|month]"); process.exit(1) }
-    const r = { id: Math.random().toString(36).slice(2, 8), at, title, prompt, dir, flags, ...(every && { every }) }
+    const dir = opt('--dir', process.cwd()), flags = opt('--flags', ''), every = opt('--every'), times = opt('--times')
+    const [when, title, prompt] = rest, at = Date.parse(when), left = times === undefined ? undefined : Number(times)
+    if (!title || !prompt || Number.isNaN(at) || (every && !['day', 'week', 'month'].includes(every)) || (left !== undefined && (!every || !Number.isInteger(left) || left < 1))) { console.log("usage: pacer remind add <when, e.g. 2026-10-13T09:00> <title> <prompt> [--dir <path>] [--flags '<claude flags>'] [--every day|week|month [--times N]]"); process.exit(1) }
+    // `left` counts the occurrences still to fire, this one included; Pacer.swift decrements it.
+    const r = { id: Math.random().toString(36).slice(2, 8), at, title, prompt, dir, flags, ...(every && { every }), ...(left && { left }) }
     writeFileSync(REMINDERS, JSON.stringify([...list, r].sort((a, b) => a.at - b.at), null, 2))
-    console.log(`${r.id}  ${new Date(at).toLocaleString()}${every ? ` every ${every}` : ''}  ${title}`)
+    console.log(`${r.id}  ${new Date(at).toLocaleString()}${every ? ` every ${every}` : ''}${left ? ` ×${left}` : ''}  ${title}`)
   } else if (sub === 'done') {
     const left = list.filter(r => r.id !== rest[0])
     if (left.length === list.length) { console.log(`no reminder ${rest[0]}`); process.exit(1) }
     writeFileSync(REMINDERS, JSON.stringify(left, null, 2))
   } else if (sub === 'list' || !sub) {
-    for (const r of list) console.log(`${r.id}  ${new Date(r.at).toLocaleString()}${r.every ? ` every ${r.every}` : ''}${r.at <= Date.now() ? ' (due)' : ''}  ${r.title}  — ${r.dir}`)
+    for (const r of list) console.log(`${r.id}  ${new Date(r.at).toLocaleString()}${r.every ? ` every ${r.every}` : ''}${r.left ? ` (${r.left} left)` : ''}${r.at <= Date.now() ? ' (due)' : ''}  ${r.title}  — ${r.dir}`)
   } else { console.log('usage: pacer remind add|list|done'); process.exit(1) }
 }
 
