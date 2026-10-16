@@ -8,11 +8,11 @@ import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 
 const pacer = join(dirname(fileURLToPath(import.meta.url)), 'pacer.mjs')
-function statusOf(limits, accounts) {
+function statusOf(limits, accounts, acct = 'a') {
   const home = mkdtempSync(join(tmpdir(), 'pacer-test-'))
   const dir = join(home, '.claude', 'pacer')
   mkdirSync(dir, { recursive: true })
-  writeFileSync(join(dir, 'samples.jsonl'), JSON.stringify({ t: Date.now(), acct: 'a', limits, tokens: {} }) + '\n')
+  writeFileSync(join(dir, 'samples.jsonl'), JSON.stringify({ t: Date.now(), acct, limits, tokens: {} }) + '\n')
   if (accounts) writeFileSync(join(dir, 'accounts.json'), JSON.stringify(accounts))
   const run = spawnSync(process.execPath, [pacer, 'status'], { env: { ...process.env, HOME: home }, encoding: 'utf8' })
   return { run, status: JSON.parse(readFileSync(join(dir, 'status.json'), 'utf8')) }
@@ -52,6 +52,8 @@ function statusOf(limits, accounts) {
   assert.match(row.advice, /^subscription canceled · since .* — re-subscribe, or it drops off /)
   const other = status.accounts.find(x => x.id === 'a')
   assert.ok(other.level !== 'ended' && !('ended' in other), 'the other account is untouched')
+  const usedLast = statusOf(limits, { a: { id: 'a', provider: 'claude', limits, asOf: now - 3600000, dir: null }, b }, 'b')
+  assert.equal(usedLast.status.accounts.at(-1).id, 'b', 'an ended account is the last tab, even when it is the login used last')
 
   settleEnded(b, { subscriptionStatus: 'canceled' }, now + 600000)
   assert.equal(b.ended.at, now, 'a later read keeps the moment it was first seen')

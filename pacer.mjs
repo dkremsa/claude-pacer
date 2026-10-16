@@ -578,7 +578,8 @@ function accountsView(accounts, currentId, samples, now, live, firstId = current
     // `dir` = the CLAUDE_CONFIG_DIR this login was last read from (null = the default ~/.claude); absent = not known yet.
     return { id: a.id, provider: a.provider, vendor: a.vendor || VENDOR[a.provider] || a.provider, title: a.title || null, via: a.via || null, email: a.email, plan: a.plan, dir: a.dir, current, asOf: a.asOf, windows: ws, pace, level, advice, ...(a.ended && { ended: a.ended }) }
   // The Claude login used last leads, so it is the tab the menu bar opens on; your own subscriptions by provider, then what a wrapper resells.
-  }).sort((a, b) => ((b.id === firstId) - (a.id === firstId)) || (!!a.via - !!b.via) || (ORDER.indexOf(a.provider) - ORDER.indexOf(b.provider)) || (b.current - a.current) || b.asOf - a.asOf)
+  // An ended subscription goes last even when it was the login used last: there is nothing on it to open on.
+  }).sort((a, b) => (!!a.ended - !!b.ended) || ((b.id === firstId) - (a.id === firstId)) || (!!a.via - !!b.via) || (ORDER.indexOf(a.provider) - ORDER.indexOf(b.provider)) || (b.current - a.current) || b.asOf - a.asOf)
 }
 
 // ---------------------------------------------------------------- status
