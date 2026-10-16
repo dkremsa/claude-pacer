@@ -13,7 +13,8 @@ let staleAfterMs: Double = 30 * 60 * 1000
 struct Window { let key: String; let percent: Double; let projected: Double; let speed: Double; let allowed: Double; let hoursLeft: Double?; let long: Bool; let rate: Double }
 /// One subscription seen on this machine. `current` = the login its provider is using right now;
 /// the rest are remembered readings, already rolled past any reset by `pacer.mjs`.
-struct Account { let id: String; let provider: String; let vendor: String; let title: String?; let via: String?; let email: String?; let plan: String?; let current: Bool; let asOf: Double; let windows: [Window]; let advice: String? }
+/// `ended` = the subscription stopped (pacer.mjs `settleEnded`); its windows say nothing any more and `advice` says what happened.
+struct Account { let id: String; let provider: String; let vendor: String; let title: String?; let via: String?; let email: String?; let plan: String?; let current: Bool; let asOf: Double; let windows: [Window]; let advice: String?; var ended = false }
 struct Status {
     var pace: Int?; var level = "unknown"; var worst = ""; var t: Double = 0; var error: String?
     var windows: [Window] = []
@@ -50,7 +51,7 @@ func loadStatus() -> Status {
     s.windows = (j["windows"] as? [[String: Any]] ?? []).map(window)
     for a in j["accounts"] as? [[String: Any]] ?? [] {
         s.accounts.append(Account(id: a["id"] as? String ?? "", provider: a["provider"] as? String ?? "claude", vendor: a["vendor"] as? String ?? (a["provider"] as? String ?? "claude"), title: a["title"] as? String, via: a["via"] as? String, email: a["email"] as? String, plan: a["plan"] as? String,
-                                  current: a["current"] as? Bool ?? false, asOf: a["asOf"] as? Double ?? s.t, windows: (a["windows"] as? [[String: Any]] ?? []).map(window), advice: a["advice"] as? String))
+                                  current: a["current"] as? Bool ?? false, asOf: a["asOf"] as? Double ?? s.t, windows: (a["windows"] as? [[String: Any]] ?? []).map(window), advice: a["advice"] as? String, ended: a["ended"] != nil))
     }
     // A reset that has passed since the tick is a fact the file cannot know yet: zero that window here, so the
     // rings and rows turn over at the minute it happens, not at the next sample.
@@ -70,7 +71,7 @@ func loadStatus() -> Status {
     // a newer read lands — dropping it the moment it passes would leave the reset poll nothing to aim at.
     if let at = resets.min() { s.nextReset = at.rounded() }
     s.windows = rolled(s.windows, s.t)
-    s.accounts = s.accounts.map { Account(id: $0.id, provider: $0.provider, vendor: $0.vendor, title: $0.title, via: $0.via, email: $0.email, plan: $0.plan, current: $0.current, asOf: $0.asOf, windows: rolled($0.windows, s.accountsT), advice: $0.advice) }
+    s.accounts = s.accounts.map { Account(id: $0.id, provider: $0.provider, vendor: $0.vendor, title: $0.title, via: $0.via, email: $0.email, plan: $0.plan, current: $0.current, asOf: $0.asOf, windows: rolled($0.windows, s.accountsT), advice: $0.advice, ended: $0.ended) }
     // A status.json written before accounts existed still draws: it is one account, the live one.
     if s.accounts.isEmpty { s.accounts = [Account(id: "", provider: "claude", vendor: "claude", title: nil, via: nil, email: nil, plan: nil, current: true, asOf: s.t, windows: s.windows, advice: s.advice)] }
     return s
@@ -127,7 +128,12 @@ func countdown(_ hours: Double) -> String {
 /// compile it without the app (see test.mjs).
 func cycleId(_ readAtMs: Double, _ hoursLeft: Double) -> Int { Int(readAtMs / 1000 + hoursLeft * 3600) }
 
-func drawRing(_ w: Window?, live: Bool, stale: Bool, center c: NSPoint, radius r: CGFloat, line: CGFloat) {
+func drawRing(_ w: Window?, live: Bool, stale: Bool, ended: Bool = false, center c: NSPoint, radius r: CGFloat, line: CGFloat) {
+    if ended {   // an empty red outline: nothing left to measure, and not the green outline of a window that reset
+        let track = NSBezierPath(ovalIn: NSRect(x: c.x - r, y: c.y - r, width: r * 2, height: r * 2))
+        track.lineWidth = line; NSColor.systemRed.withAlphaComponent(0.55).setStroke(); track.stroke()
+        return
+    }
     let value = live ? (w?.projected ?? 0) : (w?.percent ?? 0)
     if w != nil, !stale, live ? value > 100 : value >= 100 {
         NSColor.systemRed.setFill()
@@ -249,7 +255,7 @@ final class PanelView: NSView {
     private func advice(_ a: Account) -> NSAttributedString {
         let on = (a.advice ?? "").isEmpty
         let text = on ? "On pace — nothing to change" : a.advice!.prefix(1).uppercased() + a.advice!.dropFirst()
-        return NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 12.5, weight: .semibold), .foregroundColor: on || text.hasPrefix("Ready") ? NSColor.systemGreen : NSColor.labelColor])
+        return NSAttributedString(string: text, attributes: [.font: NSFont.systemFont(ofSize: 12.5, weight: .semibold), .foregroundColor: a.ended ? NSColor.systemRed : on || text.hasPrefix("Ready") ? NSColor.systemGreen : NSColor.labelColor])
     }
     private func adviceHeight(_ a: Account) -> CGFloat { ceil(advice(a).boundingRect(with: NSSize(width: inner, height: 400), options: [.usesLineFragmentOrigin]).height) }
     private func isStale(_ a: Account) -> Bool { !a.current || Date().timeIntervalSince1970 * 1000 - a.asOf > staleAfterMs }
@@ -258,7 +264,7 @@ final class PanelView: NSView {
     /// The tallest account sets the height, so switching tabs never resizes an open menu.
     private func layoutPanel() {
         let fixed: CGFloat = 36 + costH + CGFloat(tabRows) * 28 + (status.error != nil ? 22 : 0) + adviceGap + 10 + 1 + 9 + 8
-        let h: CGFloat = status.accounts.map { (a: Account) -> CGFloat in fixed + CGFloat(a.windows.count) * 55 + adviceHeight(a) + CGFloat(footerLines(a)) * 18 }.max() ?? 100
+        let h: CGFloat = status.accounts.map { (a: Account) -> CGFloat in fixed + CGFloat(a.ended ? 0 : a.windows.count) * 55 + adviceHeight(a) + CGFloat(footerLines(a)) * 18 }.max() ?? 100
         setFrameSize(NSSize(width: PanelView.width, height: h)); needsDisplay = true
     }
 
@@ -285,7 +291,7 @@ final class PanelView: NSView {
             if t.id == a.id { NSColor.labelColor.withAlphaComponent(0.14).setFill(); NSBezierPath(roundedRect: r, xRadius: 7, yRadius: 7).fill() }
             drawIcon(t.vendor, in: NSRect(x: r.minX + 5, y: r.midY - 5.5, width: 11, height: 11))
             for (k, w) in ringPair(t.windows).enumerated() {
-                drawRing(w, live: t.current, stale: false, center: NSPoint(x: r.minX + 27 + CGFloat(k) * 14, y: r.midY), radius: 4.5, line: 2.4)
+                drawRing(w, live: t.current, stale: false, ended: t.ended, center: NSPoint(x: r.minX + 27 + CGFloat(k) * 14, y: r.midY), radius: 4.5, line: 2.4)
             }
             if i + 1 < slots.count, slots[i + 1].0 == slots[i].0 {
                 NSColor.separatorColor.setFill(); NSRect(x: r.maxX + tabGap / 2, y: r.minY + 4, width: 1, height: r.height - 8).fill()
@@ -294,7 +300,7 @@ final class PanelView: NSView {
         y += 24 + costH + CGFloat(tabRows) * 28
         if let e = status.error { text("⚠︎ " + e, .systemFont(ofSize: 12), .systemOrange).draw(at: NSPoint(x: pad, y: y)); y += 22 }
         let num = NSFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-        for w in a.windows {
+        for w in a.ended ? [] : a.windows {
             y += 8
             text(title(w.key), .systemFont(ofSize: 13, weight: .semibold), .labelColor).draw(at: NSPoint(x: pad, y: y))
             let right = NSMutableAttributedString()
@@ -433,7 +439,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         let stale = live && Date().timeIntervalSince1970 * 1000 - (a?.asOf ?? s.t) > staleAfterMs
         return NSImage(size: NSSize(width: 56, height: 18), flipped: false) { _ in
             drawIcon(vendor, in: NSRect(x: 1, y: 2, width: 14, height: 14))
-            for (i, w) in pick.enumerated() { drawRing(w, live: live, stale: stale, center: NSPoint(x: 28 + CGFloat(i) * 19, y: 9), radius: 6, line: 3) }
+            for (i, w) in pick.enumerated() { drawRing(w, live: live, stale: stale, ended: a?.ended ?? false, center: NSPoint(x: 28 + CGFloat(i) * 19, y: 9), radius: 6, line: 3) }
             return true
         }
     }

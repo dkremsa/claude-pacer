@@ -84,15 +84,19 @@ async function identity(cred, profile) {
   const tier = /(\d+x)/.exec(cred.rateLimitTier || '')?.[1]
   const sub = cred.subscriptionType ? cred.subscriptionType[0].toUpperCase() + cred.subscriptionType.slice(1) : null
   const plan = [sub, tier].filter(Boolean).join(' ') || null
+  let refusal
   try {
     // Deliberately NOT getWithRetry: this is the display name, not the pacing figure, and the line below
     // falls back to the on-disk profile. Spending the tick's retry budget on it would delay every window.
     // It still needs the TIMEOUT: a fallback covers a failure, not a HANG, and undici waits 300 s by default —
     // this runs once per Claude profile, so a hung endpoint would stall the tick four times over.
     const res = await fetch(PROFILE_URL, { headers: { Authorization: `Bearer ${cred.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' }, signal: AbortSignal.timeout(Math.max(1, attemptMs())) })
-    if (res.ok) { const j = await res.json(); if (j.account?.uuid) return { id: j.account.uuid, email: j.account.email, plan } }
+    if (res.ok) {
+      const j = await res.json(), sub = j.organization?.subscription_status
+      if (j.account?.uuid) return { id: j.account.uuid, email: j.account.email, plan, ...(sub && { subscriptionStatus: sub }) }
+    } else refusal = await res.text().catch(() => '')
   } catch {}
-  try { const o = JSON.parse(readFileSync(profile.config, 'utf8')).oauthAccount; if (o?.accountUuid) return { id: o.accountUuid, email: o.emailAddress, plan } } catch {}
+  try { const o = JSON.parse(readFileSync(profile.config, 'utf8')).oauthAccount; if (o?.accountUuid) return { id: o.accountUuid, email: o.emailAddress, plan, ...(refusal && { refusal }) } } catch {}
   return { id: 'unknown', email: null, plan }
 }
 // Every remote usage read is one GET that can blip: none of these are public APIs and a 429 or a 504 under
@@ -131,13 +135,14 @@ async function getWithRetry(url, opts, label) {
     // timeout and leave the whole tick hanging on undici's 300 s default.
     try { res = await fetch(url, { ...opts, signal: AbortSignal.timeout(budget) }) } catch (e) { err = e; continue }
     if (res.ok || !RETRYABLE.has(res.status)) return res
-    err = new Error(`${label} ${res.status}`)
+    // The body rides on the error: a refusal that is not a rate limit (an org that turned access off) has only its body to say so.
+    err = Object.assign(new Error(`${label} ${res.status}`), { body: await res.text().catch(() => '') })
   }
   throw err
 }
 async function fetchUsage(cred) {
   const res = await getWithRetry(USAGE_URL, { headers: { Authorization: `Bearer ${cred.accessToken}`, 'anthropic-beta': 'oauth-2025-04-20' } }, 'usage')
-  if (!res.ok) throw new Error(`usage ${res.status}`)
+  if (!res.ok) throw Object.assign(new Error(`usage ${res.status}`), { body: await res.text().catch(() => '') })
   const j = await res.json()
   // Two response shapes have been seen in the wild: `limits[]`, and top-level five_hour/seven_day objects.
   if (Array.isArray(j.limits)) return j.limits.map(l => ({ kind: l.kind, scope: l.scope?.model?.display_name || null, percent: l.percent, resetsAt: Date.parse(l.resets_at) }))
@@ -372,6 +377,25 @@ function rememberAccount(accounts, acct, now) {
   if (fresh && acct.provider === 'claude' && accounts.legacy && Math.abs(week(accounts.legacy.limits) - week(acct.limits)) < 120000) delete accounts.legacy
   for (const [id, a] of Object.entries(accounts)) if (now - a.asOf > FORGET_AFTER) delete accounts[id]
 }
+// A subscription that stopped mid-cycle (a failed payment ended one at once) kept its last windows and looked like
+// a healthy standby, while its usage read only answered 429. What ends it: the profile's own status word, when it is
+// not "active", or a refusal whose BODY names the org switch — never a bare status code, which an expired token shares.
+const ORG_OFF = /oauth_org_not_allowed/
+function settleEnded(a, { subscriptionStatus, bodies = [], read }, now) {
+  if (!a) return
+  if (subscriptionStatus) a.subscriptionStatus = subscriptionStatus
+  const status = a.subscriptionStatus && a.subscriptionStatus !== 'active' ? a.subscriptionStatus : null
+  const reason = bodies.some(b => ORG_OFF.test(b || '')) ? 'oauth_org_not_allowed' : null
+  if (status || reason) a.ended = { ...(status ? { status } : { reason }), at: a.ended?.at || now }
+  else if (read || subscriptionStatus === 'active') delete a.ended
+}
+function endedLine(e, asOf) {
+  const at = t => new Date(t).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+  const day = new Date(asOf + FORGET_AFTER).toLocaleString('en-US', { month: 'short', day: 'numeric' })
+  return e.status
+    ? `subscription ${e.status} · since ${at(e.at)} — re-subscribe, or it drops off ${day}`
+    : `Claude Code access turned off by the organization · since ${at(e.at)} — ask its admin, or it drops off ${day}`
+}
 /** Codex's limits, asked live with the login in ~/.codex/auth.json (the endpoint its own /status reads).
  *  Its session transcripts carry the same figures, so they give the recent history for a rate — and the
  *  whole reading when the live ask fails (expired token, offline) or `live` is off. */
@@ -548,10 +572,11 @@ function accountsView(accounts, currentId, samples, now, live, firstId = current
     const hist = a.id === currentId ? samples : current ? live[a.id] : []
     // Not logged in = nothing is being spent: it lands at reset exactly where it stands now.
     const ws = windows(rolled(a.limits || [], now), hist, now).map(w => current ? w : { ...w, speed: 0, rate: 0, projected: w.percent })
-    const advice = a.id === currentId ? advise(ws, hist, null, now) : current ? (advise(ws, hist, null, now) || '').replace(' — no per-model data yet', '') || null : standby(ws)
-    const { pace, level } = verdict(ws)
+    const advice = a.ended ? endedLine(a.ended, a.asOf) : a.id === currentId ? advise(ws, hist, null, now) : current ? (advise(ws, hist, null, now) || '').replace(' — no per-model data yet', '') || null : standby(ws)
+    // `ended` is not a level roam ranks, so it never runs a session on this login (roam/accounts.mjs RANK).
+    const { pace, level } = a.ended ? { pace: null, level: 'ended' } : verdict(ws)
     // `dir` = the CLAUDE_CONFIG_DIR this login was last read from (null = the default ~/.claude); absent = not known yet.
-    return { id: a.id, provider: a.provider, vendor: a.vendor || VENDOR[a.provider] || a.provider, title: a.title || null, via: a.via || null, email: a.email, plan: a.plan, dir: a.dir, current, asOf: a.asOf, windows: ws, pace, level, advice }
+    return { id: a.id, provider: a.provider, vendor: a.vendor || VENDOR[a.provider] || a.provider, title: a.title || null, via: a.via || null, email: a.email, plan: a.plan, dir: a.dir, current, asOf: a.asOf, windows: ws, pace, level, advice, ...(a.ended && { ended: a.ended }) }
   // The Claude login used last leads, so it is the tab the menu bar opens on; your own subscriptions by provider, then what a wrapper resells.
   }).sort((a, b) => ((b.id === firstId) - (a.id === firstId)) || (!!a.via - !!b.via) || (ORDER.indexOf(a.provider) - ORDER.indexOf(b.provider)) || (b.current - a.current) || b.asOf - a.asOf)
 }
@@ -611,15 +636,27 @@ async function tick() {
   const last = samples.at(-1)?.t || now - 10 * 60000
   // Every profile that answers is a live login. Pacer never refreshes a token (that is Claude Code's, and rotating
   // it from here could log a session out), so a profile that has not run for a while just keeps its last reading.
-  const logins = []
+  const logins = [], refused = []
   let lastError = 'no Claude Code login found'
   for (const profile of profiles()) {
+    let cred
     try {
-      const cred = credential(profile)
+      cred = credential(profile)
       if (!cred) continue
       const limits = await fetchUsage(cred)
-      logins.push({ profile, limits, acct: await identity(cred, profile), used: statSync(profile.config).mtimeMs })
-    } catch (e) { lastError = e.message; console.error(`${profile.service}: ${e.message}`) }   // one dead profile must leave a trace
+      const { refusal, ...acct } = await identity(cred, profile)
+      logins.push({ profile, limits, acct, used: statSync(profile.config).mtimeMs })
+    } catch (e) {
+      lastError = e.message
+      // one dead profile must leave a trace — with the body, since a refusal's shape is only ever seen in the log
+      console.error(`${profile.service}: ${e.message}${e.body ? ' ' + JSON.stringify(e.body.slice(0, 300)) : ''}`)
+      // The profile read still answers when usage does not, and is what says whether the subscription is still there.
+      if (cred && attemptMs() > 0) {
+        const { refusal, ...who } = await identity(cred, profile)
+        if (refusal) console.error(`${profile.service}: profile ${JSON.stringify(refusal.slice(0, 300))}`)
+        refused.push({ id: who.id, subscriptionStatus: who.subscriptionStatus, bodies: [e.body, refusal] })
+      }
+    }
   }
   // Top-level status is a contract other tools read as "the default Claude login" (they run on it), so it is
   // pinned to the default profile; only when that one is unreadable does it fall to the login used last.
@@ -641,8 +678,11 @@ async function tick() {
       appendFileSync(SAMPLES, JSON.stringify(sample) + '\n')
       samples.push(sample)
       rememberAccount(accounts, { ...l.acct, provider: 'claude', limits: l.limits, dir: l.profile.dir }, now)
+      settleEnded(accounts[l.acct.id], { read: true }, now)
     }
   }
+  // A failed read leaves the reading and `asOf` alone, so the account still drops off a week after it last answered.
+  for (const r of refused) settleEnded(accounts[r.id], r, now)
   const live = {}
   for (const l of unique) if (l !== head) live[l.acct.id] = samples.filter(x => x.acct === l.acct.id)
   for (const read of [n => codexReading(n, true), ...PROVIDERS]) {
@@ -658,11 +698,12 @@ async function tick() {
     status.error = `usage unreadable: ${lastError}`; status.errorAt = now
     status.accounts = accountsView(accounts, null, [], now, live, status.accounts?.[0]?.id); status.accountsAt = now
     // With no Claude read there is no telling which Claude login is in use, so none of them is told to "switch back".
-    for (const a of status.accounts) if (a.provider === 'claude') a.advice = 'last reading — this login could not be read just now'
+    for (const a of status.accounts) if (a.provider === 'claude' && !a.ended) a.advice = 'last reading — this login could not be read just now'
     writeFileSync(STATUS, JSON.stringify(status, null, 2))
     console.error(status.error); process.exit(1)
   }
   const status = buildStatus(head.limits, samples, now, head.acct.id)
+  if (accounts[head.acct.id]?.ended) status.level = 'ended'   // the pinned login answered, but nothing may run on it
   status.accounts = accountsView(accounts, head.acct.id, samples.filter(s => !s.acct || s.acct === head.acct.id), now, live, recent.acct.id)
   status.accountsAt = now   // accounts are read even when the Claude figures above could not be, so they carry their own time
   writeFileSync(STATUS, JSON.stringify(status, null, 2))
@@ -722,8 +763,8 @@ function remind(args) {
   } else { console.log('usage: pacer remind add|list|done'); process.exit(1) }
 }
 
-// Exported so the retry policy can be tested against a stub server instead of a real provider.
-export { getWithRetry, RETRY_MS, RETRYABLE, ATTEMPT_MS, READ_BUDGET_MS, startReadBudget }
+// Exported so the retry policy can be tested against a stub server instead of a real provider, and the ended rule on fixtures.
+export { getWithRetry, RETRY_MS, RETRYABLE, ATTEMPT_MS, READ_BUDGET_MS, startReadBudget, settleEnded }
 
 // Run the CLI only when this file IS the entry point, so importing it for a test does not fire a tick.
 // Fail-OPEN: if argv[1] cannot be resolved the CLI still runs, because a guard that silently does nothing

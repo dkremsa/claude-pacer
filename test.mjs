@@ -8,11 +8,12 @@ import { spawnSync } from 'node:child_process'
 import assert from 'node:assert/strict'
 
 const pacer = join(dirname(fileURLToPath(import.meta.url)), 'pacer.mjs')
-function statusOf(limits) {
+function statusOf(limits, accounts) {
   const home = mkdtempSync(join(tmpdir(), 'pacer-test-'))
   const dir = join(home, '.claude', 'pacer')
   mkdirSync(dir, { recursive: true })
   writeFileSync(join(dir, 'samples.jsonl'), JSON.stringify({ t: Date.now(), acct: 'a', limits, tokens: {} }) + '\n')
+  if (accounts) writeFileSync(join(dir, 'accounts.json'), JSON.stringify(accounts))
   const run = spawnSync(process.execPath, [pacer, 'status'], { env: { ...process.env, HOME: home }, encoding: 'utf8' })
   return { run, status: JSON.parse(readFileSync(join(dir, 'status.json'), 'utf8')) }
 }
@@ -32,6 +33,40 @@ function statusOf(limits) {
   assert.match(run.stdout, /weekly_all\s+0% · idle/)
   assert.ok(status.pace < 95, 'a passed reset must not set the pace')
 }
+// ── a subscription that ended ───────────────────────────────────────────────────────────────────────────
+// The case it exists for: a remembered account whose subscription was canceled mid-week kept its windows and read as
+// a healthy standby. It must read as ended — never a level roam would run a session on — until an "active" read.
+{
+  const { settleEnded } = await import('./pacer.mjs')
+  const now = Date.now()
+  const limits = [{ kind: 'session', scope: null, percent: 24, resetsAt: now + 3600000 }, { kind: 'weekly_all', scope: null, percent: 69, resetsAt: now + 3 * 86400000 }]
+  const b = { id: 'b', provider: 'claude', email: 'b@example.com', plan: 'Max 20x', limits, asOf: now - 600000, dir: null }
+
+  settleEnded(b, { subscriptionStatus: 'canceled', bodies: ['{"error":{"type":"rate_limit_error"}}'] }, now)
+  assert.deepEqual(b.ended, { status: 'canceled', at: now }, 'a non-active status word ends the subscription')
+  const { run, status } = statusOf(limits, { a: { id: 'a', provider: 'claude', limits, asOf: now, dir: null }, b })
+  assert.equal(run.status, 0, run.stderr)
+  const row = status.accounts.find(x => x.id === 'b')
+  assert.equal(row.level, 'ended', `an ended account must not carry a usable level (got ${row.level})`)
+  assert.equal(row.pace, null)
+  assert.match(row.advice, /^subscription canceled · since .* — re-subscribe, or it drops off /)
+  const other = status.accounts.find(x => x.id === 'a')
+  assert.ok(other.level !== 'ended' && !('ended' in other), 'the other account is untouched')
+
+  settleEnded(b, { subscriptionStatus: 'canceled' }, now + 600000)
+  assert.equal(b.ended.at, now, 'a later read keeps the moment it was first seen')
+  settleEnded(b, { subscriptionStatus: 'active' }, now + 1200000)
+  assert.equal(b.ended, undefined, 'an "active" read clears it')
+
+  // Only a body that SAYS so ends it: an expired token answers the same 429 with nothing to say.
+  settleEnded(b, { bodies: ['', undefined] }, now)
+  assert.equal(b.ended, undefined, 'a bare refusal is not an ended subscription')
+  settleEnded(b, { bodies: ['{"type":"error","error":{"type":"oauth_org_not_allowed","message":"Your organization has disabled Claude subscription access"}}'] }, now)
+  assert.deepEqual(b.ended, { reason: 'oauth_org_not_allowed', at: now })
+  settleEnded(b, { read: true }, now)
+  assert.equal(b.ended, undefined, 'a usage read that answers again clears an org refusal')
+}
+
 // ── the retry policy ────────────────────────────────────────────────────────────────────────────────────
 // Against a real local server, not a stubbed fetch: the thing worth testing is WHICH failures are retried,
 // and a stub would only prove the stub. The waits are shortened in place — the policy under test is the
@@ -85,8 +120,8 @@ function statusOf(limits) {
   // A sustained outage gives up rather than hanging the tick, and says which read failed.
   {
     let hits = 0
-    const s = await serve((_, res) => { hits++; res.writeHead(503); res.end() })
-    await assert.rejects(() => getWithRetry(s.url, {}, 'cursor usage'), /cursor usage 503/)
+    const s = await serve((_, res) => { hits++; res.writeHead(503); res.end('{"error":"busy"}') })
+    await assert.rejects(() => getWithRetry(s.url, {}, 'cursor usage'), e => /cursor usage 503/.test(e.message) && e.body === '{"error":"busy"}')
     assert.equal(hits, 3, 'it must stop after the budget, not retry for ever')
     s.close()
   }
