@@ -119,7 +119,7 @@ func countdown(_ hours: Double) -> String {
     return "\(mm)m"
 }
 
-/// One ring. A live login shows SPEED (projected % at reset; past 100 a red ring fills again up to 200, a solid
+/// One ring. A live login shows SPEED (projected % at reset; past 100 red fills over a full orange ring up to 200, a solid
 /// red disc from there). A remembered
 /// one shows what is USED, since nothing is being spent there — and a window that has reset since
 /// draws as a full green outline, which is the signal to switch back.
@@ -147,6 +147,7 @@ func drawRing(_ w: Window?, live: Bool, stale: Bool, ended: Bool = false, center
     (fresh ? NSColor.systemGreen.withAlphaComponent(0.85) : NSColor.labelColor.withAlphaComponent(0.25)).setStroke(); track.stroke()
     guard w != nil, value > 0 else { return }
     let fill = live && value > 100 ? value - 100 : value
+    if live, !stale, value > 100 { NSColor.systemOrange.setStroke(); track.stroke() }
     let arc = NSBezierPath()
     arc.appendArc(withCenter: c, radius: r, startAngle: 90, endAngle: 90 - 360 * min(fill, 100) / 100, clockwise: true)
     arc.lineWidth = line; arc.lineCapStyle = .round
