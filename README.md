@@ -4,7 +4,7 @@ Two rings in the macOS menu bar that tell you whether your AI coding subscriptio
 
 <img src="docs/icon.png" width="96" align="right">
 
-**The rings** are the session and the week of whichever tab is open — the Claude login you used last, until you pick another. Each fills to its **speed**: the projected % at reset if you keep going like this. 100 = you run out exactly at reset. Green ≤ 80, amber ≤ 100, and past 100 the ring becomes a solid red disc. (A tab you are not logged into has no speed: its rings show what was **used**, on a tighter scale, the way its card does.) No numbers up there.
+**The rings** are the session and the week of whichever tab is open — the Claude login you used last, until you pick another. Each fills to its **speed**: the projected % at reset if you keep going like this. 100 = you run out exactly at reset. Green ≤ 80, amber ≤ 100, past 100 a red ring fills again, and from 200 it is a solid red disc. (A tab you are not logged into has no speed: its rings show what was **used**, on a tighter scale, the way its card does.) No numbers up there.
 
 Click it:
 

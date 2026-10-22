@@ -119,7 +119,8 @@ func countdown(_ hours: Double) -> String {
     return "\(mm)m"
 }
 
-/// One ring. A live login shows SPEED (projected % at reset; past 100 = solid red disc). A remembered
+/// One ring. A live login shows SPEED (projected % at reset; past 100 a red ring fills again up to 200, a solid
+/// red disc from there). A remembered
 /// one shows what is USED, since nothing is being spent there — and a window that has reset since
 /// draws as a full green outline, which is the signal to switch back.
 /// Identifies a reset CYCLE by the absolute instant it ends — read time plus what is left — so it is constant
@@ -135,7 +136,7 @@ func drawRing(_ w: Window?, live: Bool, stale: Bool, ended: Bool = false, center
         return
     }
     let value = live ? (w?.projected ?? 0) : (w?.percent ?? 0)
-    if w != nil, !stale, live ? value > 100 : value >= 100 {
+    if w != nil, !stale, live ? value >= 200 : value >= 100 {
         NSColor.systemRed.setFill()
         NSBezierPath(ovalIn: NSRect(x: c.x - r - line / 2, y: c.y - r - line / 2, width: r * 2 + line, height: r * 2 + line)).fill()
         return
@@ -145,8 +146,9 @@ func drawRing(_ w: Window?, live: Bool, stale: Bool, ended: Bool = false, center
     let fresh = !live && w != nil && value == 0
     (fresh ? NSColor.systemGreen.withAlphaComponent(0.85) : NSColor.labelColor.withAlphaComponent(0.25)).setStroke(); track.stroke()
     guard w != nil, value > 0 else { return }
+    let fill = live && value > 100 ? value - 100 : value
     let arc = NSBezierPath()
-    arc.appendArc(withCenter: c, radius: r, startAngle: 90, endAngle: 90 - 360 * min(value, 100) / 100, clockwise: true)
+    arc.appendArc(withCenter: c, radius: r, startAngle: 90, endAngle: 90 - 360 * min(fill, 100) / 100, clockwise: true)
     arc.lineWidth = line; arc.lineCapStyle = .round
     (stale ? NSColor.secondaryLabelColor : live ? levelColor(value) : usedColor(value)).setStroke(); arc.stroke()
 }
