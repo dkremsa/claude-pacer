@@ -30,6 +30,8 @@ function statusOf(limits, accounts, acct = 'a') {
   const week = status.windows.find(w => w.key === 'weekly_all')
   assert.equal(week.percent, 0)
   assert.equal(week.idle, true)
+  assert.ok(Math.abs(week.nextMinutes - (7 * 24 * 60 - 1)) < 1, 'a passed weekly reset names the next one, a week on')
+  assert.equal(status.windows.find(w => w.key === 'session').nextMinutes, undefined)
   assert.match(run.stdout, /weekly_all\s+0% · idle/)
   assert.ok(status.pace < 95, 'a passed reset must not set the pace')
 }

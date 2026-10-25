@@ -10,7 +10,7 @@ let remindersPath = dir + "/reminders.json"   // written by `pacer remind`
 /// Past this a reading is not live: grey rings, "last checked". `pacer.mjs status` uses the same 30 minutes.
 let staleAfterMs: Double = 30 * 60 * 1000
 
-struct Window { let key: String; let percent: Double; let projected: Double; let speed: Double; let allowed: Double; let hoursLeft: Double?; let long: Bool; let rate: Double }
+struct Window { let key: String; let percent: Double; let projected: Double; let speed: Double; let allowed: Double; let hoursLeft: Double?; let long: Bool; let rate: Double; var hoursNext: Double? = nil }
 /// One subscription seen on this machine. `current` = the login its provider is using right now;
 /// the rest are remembered readings, already rolled past any reset by `pacer.mjs`.
 /// `ended` = the subscription stopped (pacer.mjs `settleEnded`); its windows say nothing any more and `advice` says what happened.
@@ -46,7 +46,8 @@ func loadStatus() -> Status {
     func window(_ w: [String: Any]) -> Window {
         Window(key: w["key"] as? String ?? "", percent: w["percent"] as? Double ?? 0, projected: w["projected"] as? Double ?? 0,
                                 speed: w["speed"] as? Double ?? 0, allowed: w["allowedPerHour"] as? Double ?? 0,
-                                hoursLeft: (w["minutesLeft"] as? Double).map { $0 / 60 }, long: w["long"] as? Bool ?? false, rate: w["rate"] as? Double ?? 0)
+                                hoursLeft: (w["minutesLeft"] as? Double).map { $0 / 60 }, long: w["long"] as? Bool ?? false, rate: w["rate"] as? Double ?? 0,
+                                hoursNext: (w["nextMinutes"] as? Double).map { $0 / 60 })
     }
     s.windows = (j["windows"] as? [[String: Any]] ?? []).map(window)
     for a in j["accounts"] as? [[String: Any]] ?? [] {
@@ -62,7 +63,9 @@ func loadStatus() -> Status {
     func rolled(_ ws: [Window], _ readAt: Double) -> [Window] {
         ws.map { w in
             guard let h = w.hoursLeft, h - (nowMs - readAt) / 3600000 <= 0 else { return w }
-            return Window(key: w.key, percent: 0, projected: 0, speed: 0, allowed: w.allowed, hoursLeft: nil, long: w.long, rate: 0)
+            let since = (nowMs - readAt) / 3600000 - h, week = 168.0
+            return Window(key: w.key, percent: 0, projected: 0, speed: 0, allowed: w.allowed, hoursLeft: nil, long: w.long, rate: 0,
+                          hoursNext: w.key.hasPrefix("weekly") ? h + (floor(since / week) + 1) * week : nil)
         }
     }
     var resets: [Double] = s.windows.compactMap { $0.hoursLeft }.map { s.t / 1000 + $0 * 3600 }
@@ -323,7 +326,8 @@ final class PanelView: NSView {
             }
             y += 9
             // Hours left were true at the tick; a remembered account can be read long after, so count from now.
-            text(w.hoursLeft.map { "resets in " + countdown(max(0, $0 - (now - status.accountsT) / 3600000)) } ?? (a.current ? "idle" : "reset — ready"), .systemFont(ofSize: 13), w.hoursLeft == nil && !a.current ? .systemGreen : mut).draw(at: NSPoint(x: pad, y: y))
+            let left = { (h: Double) in countdown(max(0, h - (now - self.status.accountsT) / 3600000)) }
+            text(w.hoursLeft.map { "resets in " + left($0) } ?? ((a.current ? "idle" : "reset — ready") + (w.hoursNext.map { " · next in " + left($0) } ?? "")), .systemFont(ofSize: 13), w.hoursLeft == nil && !a.current ? .systemGreen : mut).draw(at: NSPoint(x: pad, y: y))
             y += 17
         }
         y += adviceGap

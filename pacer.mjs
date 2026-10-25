@@ -216,7 +216,7 @@ function windows(limits, samples, now) {
     // poisoned everything downstream (pace showed "—", advice said "ease off for the next NaNh").
     // No reset time = the window hasn't started; it is idle by definition: speed 0, projected = used.
     if (!Number.isFinite(l.resetsAt)) {
-      return { key, kind: l.kind, scope: l.scope, percent, long: (WINDOW_MIN[l.kind] || 300) > LONG_WINDOW_MIN, elapsed: 0, minutesLeft: null, speed: 0, rate: 0, projected: percent, allowedPerHour: null, resetsAt: null, idle: true }
+      return { key, kind: l.kind, scope: l.scope, percent, long: (WINDOW_MIN[l.kind] || 300) > LONG_WINDOW_MIN, elapsed: 0, minutesLeft: null, speed: 0, rate: 0, projected: percent, allowedPerHour: null, resetsAt: null, idle: true, ...(l.nextAt && { nextMinutes: (l.nextAt - now) / 60000 }) }
     }
     const minutesLeft = Math.max(1, (l.resetsAt - now) / 60000)
     const length = l.windowMin || WINDOW_MIN[l.kind] || Math.max(minutesLeft, 5 * 60)   // a provider that states its own cycle (a billing month) wins
@@ -368,7 +368,11 @@ function costOf(tokens) {
 // reset that has passed since the reading zeroes that window instead of freezing it at the old figure.
 function loadAccounts() { try { return JSON.parse(readFileSync(ACCOUNTS, 'utf8')) } catch { return {} } }
 // Keep in step with `rolled()` in Pacer.swift, which applies the same rule between two ticks.
-function rolled(limits, now) { return limits.map(l => Number.isFinite(l.resetsAt) && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null } : l) }
+// A week turns over on a fixed cycle whether or not it was used (samples.jsonl: same hour, whole weeks apart, across
+// idle gaps), so its next reset is known; a session window opens on first use, so its next one is not.
+const CYCLE_MIN = { weekly_all: WINDOW_MIN.weekly_all, weekly_scoped: WINDOW_MIN.weekly_scoped }
+function nextReset(l, now) { const c = CYCLE_MIN[l.kind] * 60000; return c ? l.resetsAt + Math.ceil((now - l.resetsAt + 1) / c) * c : null }
+function rolled(limits, now) { return limits.map(l => Number.isFinite(l.resetsAt) && l.resetsAt <= now ? { ...l, percent: 0, resetsAt: null, nextAt: nextReset(l, now) } : l) }
 function rememberAccount(accounts, acct, now) {
   const fresh = !accounts[acct.id]
   accounts[acct.id] = { ...accounts[acct.id], ...acct, asOf: now }
