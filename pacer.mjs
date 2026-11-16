@@ -9,6 +9,9 @@
  *                  a reminder the app notifies about when due; clicking it copies `cd <dir> && claude <flags> '<prompt>'`
  *                  to paste when ready. A recurring one moves to its next date when it fires (Pacer.swift `nextDate`)
  *   pacer remind list | done <id>
+ *   pacer billing <email> <next charge, e.g. 2026-11-28T20:18:32Z> | list
+ *                  the date a subscription renews (claude.ai › Settings › Billing). No endpoint Pacer's login
+ *                  token may call returns it, so it is entered by hand and rolled forward a month per renewal
  *
  * Two data sources, joined here for the first time:
  *   1. https://api.anthropic.com/api/oauth/usage — server truth, percent per window, no breakdown.
@@ -33,6 +36,7 @@ const SAMPLES = join(DIR, 'samples.jsonl')
 const STATUS = join(DIR, 'status.json')
 const ACCOUNTS = join(DIR, 'accounts.json')
 const REMINDERS = join(DIR, 'reminders.json')   // Pacer.swift reads the same file
+const BILLING = join(DIR, 'billing.json')
 const CODEX = join(homedir(), '.codex')
 const FORGET_AFTER = 7 * 24 * 3600000   // an account not seen for a week drops off
 const PROJECTS = join(homedir(), '.claude', 'projects')
@@ -580,7 +584,8 @@ function accountsView(accounts, currentId, samples, now, live, firstId = current
     // `ended` is not a level roam ranks, so it never runs a session on this login (roam/accounts.mjs RANK).
     const { pace, level } = a.ended ? { pace: null, level: 'ended' } : verdict(ws)
     // `dir` = the CLAUDE_CONFIG_DIR this login was last read from (null = the default ~/.claude); absent = not known yet.
-    return { id: a.id, provider: a.provider, vendor: a.vendor || VENDOR[a.provider] || a.provider, title: a.title || null, via: a.via || null, email: a.email, plan: a.plan, dir: a.dir, current, asOf: a.asOf, windows: ws, pace, level, advice, ...(a.ended && { ended: a.ended }) }
+    const renewsAt = a.provider === 'claude' && a.email ? renewal(a.email, now) : null
+    return { id: a.id, provider: a.provider, vendor: a.vendor || VENDOR[a.provider] || a.provider, title: a.title || null, via: a.via || null, email: a.email, plan: a.plan, dir: a.dir, current, asOf: a.asOf, windows: ws, pace, level, advice, ...(a.ended && { ended: a.ended }), ...(renewsAt && { renewsAt }) }
   // The Claude login used last leads, so it is the tab the menu bar opens on; your own subscriptions by provider, then what a wrapper resells.
   // An ended subscription goes last even when it was the login used last: there is nothing on it to open on.
   }).sort((a, b) => (!!a.ended - !!b.ended) || ((b.id === firstId) - (a.id === firstId)) || (!!a.via - !!b.via) || (ORDER.indexOf(a.provider) - ORDER.indexOf(b.provider)) || (b.current - a.current) || b.asOf - a.asOf)
@@ -768,6 +773,27 @@ function remind(args) {
   } else { console.log('usage: pacer remind add|list|done'); process.exit(1) }
 }
 
+// ---------------------------------------------------------------- billing
+// The renewal date lives on claude.ai (subscription_details), which refuses an OAuth token, so it is typed in once.
+// A monthly plan renews on the same day and time each month; a date that has passed rolls forward by whole months.
+const loadBilling = () => { try { return JSON.parse(readFileSync(BILLING, 'utf8')) } catch { return {} } }
+function renewal(email, now) {
+  const b = loadBilling()[email.toLowerCase()]
+  if (!b) return null
+  const d = new Date(b.nextChargeAt)
+  while (d.getTime() <= now) d.setUTCMonth(d.getUTCMonth() + 1)
+  return d.getTime()
+}
+function billing(args) {
+  const b = loadBilling(), [email, when] = args
+  if (!email || email === 'list') { for (const [e, x] of Object.entries(b)) console.log(`${e}  renews ${new Date(renewal(e, Date.now())).toISOString().slice(0, 16)}Z`); return }
+  const at = Date.parse(when)
+  if (!email.includes('@') || Number.isNaN(at)) { console.log('usage: pacer billing <email> <next charge, e.g. 2026-11-28T20:18:32Z> | list'); process.exit(1) }
+  b[email.toLowerCase()] = { nextChargeAt: new Date(at).toISOString() }
+  writeFileSync(BILLING, JSON.stringify(b, null, 2))
+  console.log(`${email.toLowerCase()}  renews ${new Date(at).toISOString().slice(0, 16)}Z`)
+}
+
 // Exported so the retry policy can be tested against a stub server instead of a real provider, and the ended rule on fixtures.
 export { getWithRetry, RETRY_MS, RETRYABLE, ATTEMPT_MS, READ_BUDGET_MS, startReadBudget, settleEnded }
 
@@ -782,5 +808,6 @@ if (isMain) {
   else if (cmd === 'status') await status()
   else if (cmd === 'fit') { const s = loadSamples(); console.log(JSON.stringify({ prior: fit(s), cacheFull: fit(s, { cacheReadPrior: 1 }) }, null, 2)) }
   else if (cmd === 'remind') remind(process.argv.slice(3))
-  else { console.log('usage: pacer tick|status|fit|remind'); process.exit(1) }
+  else if (cmd === 'billing') billing(process.argv.slice(3))
+  else { console.log('usage: pacer tick|status|fit|remind|billing'); process.exit(1) }
 }

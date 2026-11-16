@@ -14,7 +14,7 @@ struct Window { let key: String; let percent: Double; let projected: Double; let
 /// One subscription seen on this machine. `current` = the login its provider is using right now;
 /// the rest are remembered readings, already rolled past any reset by `pacer.mjs`.
 /// `ended` = the subscription stopped (pacer.mjs `settleEnded`); its windows say nothing any more and `advice` says what happened.
-struct Account { let id: String; let provider: String; let vendor: String; let title: String?; let via: String?; let email: String?; let plan: String?; let current: Bool; let asOf: Double; let windows: [Window]; let advice: String?; var ended = false }
+struct Account { let id: String; let provider: String; let vendor: String; let title: String?; let via: String?; let email: String?; let plan: String?; let current: Bool; let asOf: Double; let windows: [Window]; let advice: String?; var ended = false; var renewsAt: Double? = nil }
 struct Status {
     var pace: Int?; var level = "unknown"; var worst = ""; var t: Double = 0; var error: String?
     var windows: [Window] = []
@@ -52,7 +52,7 @@ func loadStatus() -> Status {
     s.windows = (j["windows"] as? [[String: Any]] ?? []).map(window)
     for a in j["accounts"] as? [[String: Any]] ?? [] {
         s.accounts.append(Account(id: a["id"] as? String ?? "", provider: a["provider"] as? String ?? "claude", vendor: a["vendor"] as? String ?? (a["provider"] as? String ?? "claude"), title: a["title"] as? String, via: a["via"] as? String, email: a["email"] as? String, plan: a["plan"] as? String,
-                                  current: a["current"] as? Bool ?? false, asOf: a["asOf"] as? Double ?? s.t, windows: (a["windows"] as? [[String: Any]] ?? []).map(window), advice: a["advice"] as? String, ended: a["ended"] != nil))
+                                  current: a["current"] as? Bool ?? false, asOf: a["asOf"] as? Double ?? s.t, windows: (a["windows"] as? [[String: Any]] ?? []).map(window), advice: a["advice"] as? String, ended: a["ended"] != nil, renewsAt: a["renewsAt"] as? Double))
     }
     // A reset that has passed since the tick is a fact the file cannot know yet: zero that window here, so the
     // rings and rows turn over at the minute it happens, not at the next sample.
@@ -74,7 +74,7 @@ func loadStatus() -> Status {
     // a newer read lands — dropping it the moment it passes would leave the reset poll nothing to aim at.
     if let at = resets.min() { s.nextReset = at.rounded() }
     s.windows = rolled(s.windows, s.t)
-    s.accounts = s.accounts.map { Account(id: $0.id, provider: $0.provider, vendor: $0.vendor, title: $0.title, via: $0.via, email: $0.email, plan: $0.plan, current: $0.current, asOf: $0.asOf, windows: rolled($0.windows, s.accountsT), advice: $0.advice, ended: $0.ended) }
+    s.accounts = s.accounts.map { Account(id: $0.id, provider: $0.provider, vendor: $0.vendor, title: $0.title, via: $0.via, email: $0.email, plan: $0.plan, current: $0.current, asOf: $0.asOf, windows: rolled($0.windows, s.accountsT), advice: $0.advice, ended: $0.ended, renewsAt: $0.renewsAt) }
     // A status.json written before accounts existed still draws: it is one account, the live one.
     if s.accounts.isEmpty { s.accounts = [Account(id: "", provider: "claude", vendor: "claude", title: nil, via: nil, email: nil, plan: nil, current: true, asOf: s.t, windows: s.windows, advice: s.advice)] }
     return s
@@ -219,6 +219,10 @@ final class PanelView: NSView {
     override func mouseUp(with event: NSEvent) {
         let p = convert(event.locationInWindow, from: nil)
         if let i = tabRects().firstIndex(where: { $0.insetBy(dx: -2, dy: -4).contains(p) }) { selectedId = status.accounts[i].id; needsDisplay = true; onSelect?(); return }
+        if let r = usageLink, r.insetBy(dx: -2, dy: -3).contains(p) {
+            enclosingMenuItem?.menu?.cancelTracking()
+            NSWorkspace.shared.open(PanelView.usageURL); return
+        }
         onClick?()
     }
 
@@ -266,7 +270,10 @@ final class PanelView: NSView {
     private func adviceHeight(_ a: Account) -> CGFloat { ceil(advice(a).boundingRect(with: NSSize(width: inner, height: 400), options: [.usesLineFragmentOrigin]).height) }
     private func isStale(_ a: Account) -> Bool { !a.current || Date().timeIntervalSince1970 * 1000 - a.asOf > staleAfterMs }
     /// Who, and — when the reading is not live — when it was taken.
-    private func footerLines(_ a: Account) -> Int { 1 + (isStale(a) ? 1 : 0) }
+    private func footerLines(_ a: Account) -> Int { 1 + (a.provider == "claude" ? 1 : 0) + (isStale(a) ? 1 : 0) }
+    /// claude.ai's usage page — the only place a free reset shows; it opens on whichever login the browser holds.
+    static let usageURL = URL(string: "https://claude.ai/settings/usage")!
+    private var usageLink: NSRect?
     /// The tallest account sets the height, so switching tabs never resizes an open menu.
     private func layoutPanel() {
         let fixed: CGFloat = 36 + costH + CGFloat(tabRows) * 28 + (status.error != nil ? 22 : 0) + adviceGap + 10 + 1 + 9 + 8
@@ -345,6 +352,17 @@ final class PanelView: NSView {
         NSBezierPath(ovalIn: NSRect(x: pad, y: y + 5, width: 7, height: 7)).fill()
         text([a.email ?? "earlier account", a.plan, a.via.map { "via " + $0 }].compactMap { $0 }.joined(separator: " · "), .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad + 13, y: y))
         y += 18
+        usageLink = nil
+        if a.provider == "claude" {
+            let df = DateFormatter(); df.dateFormat = "MMM d"
+            let renews = a.renewsAt.map { "renews " + df.string(from: Date(timeIntervalSince1970: $0 / 1000)) + " · " } ?? ""
+            let r = text(renews, .systemFont(ofSize: 13), mut), l = text("check free reset ↗", .systemFont(ofSize: 13), .linkColor)
+            r.draw(at: NSPoint(x: pad + 13, y: y))
+            let x = pad + 13 + r.size().width
+            l.draw(at: NSPoint(x: x, y: y))
+            usageLink = NSRect(x: x, y: y, width: l.size().width, height: 17)
+            y += 18
+        }
         if isStale(a) {
             let df = DateFormatter(); df.dateFormat = "MMM d, HH:mm"
             text("last checked: " + df.string(from: Date(timeIntervalSince1970: a.asOf / 1000)), .systemFont(ofSize: 13), mut).draw(at: NSPoint(x: pad + 13, y: y))
