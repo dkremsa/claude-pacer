@@ -1,5 +1,5 @@
 // Pacer — menu-bar pace for your AI coding subscriptions (Claude Code, Codex). Reads ~/.claude/pacer/status.json
-// (written by `pacer.mjs tick`, launchd every 10 min). Menu bar = two speed rings (session, week);
+// (written by `pacer.mjs tick`, launchd every 10 min). Menu bar = two speed rings (session, week; week, model week where a login has no session limit);
 // speed = projected percent at reset, 100 = you run out exactly at reset. Build: ./build.sh
 import Cocoa
 import UserNotifications
@@ -156,9 +156,11 @@ func drawRing(_ w: Window?, live: Bool, stale: Bool, ended: Bool = false, center
     arc.lineWidth = line; arc.lineCapStyle = .round
     (stale ? NSColor.secondaryLabelColor : live ? levelColor(value) : usedColor(value)).setStroke(); arc.stroke()
 }
-/// Session then week where a provider has them; otherwise its own first two windows (a month, a day's model quotas).
+/// Session then week where a provider has them; week then its model-scoped week where the login has no session
+/// limit; otherwise its own first two windows (a month, a day's model quotas).
 func ringPair(_ ws: [Window]) -> [Window?] {
     let named = ["session", "weekly_all"].map { k in ws.first { $0.key == k } }
+    if named[0] == nil, let week = named[1], let scoped = ws.first(where: { $0.key.hasPrefix("weekly_scoped:") }) { return [week, scoped] }
     if named.contains(where: { $0 != nil }) { return named }
     return [ws.first, ws.count > 1 ? ws[1] : nil]
 }
@@ -454,7 +456,7 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent n: UNNotification, withCompletionHandler done: @escaping (UNNotificationPresentationOptions) -> Void) { done([.banner, .list, .sound]) }
 
-    /// Two rings, session then week, for the account whose TAB is open — the tab outlives the menu, so the
+    /// Two rings (`ringPair`) for the account whose TAB is open — the tab outlives the menu, so the
     /// menu bar and the card say the same thing rather than the icon silently meaning a different subscription.
     /// A remembered login shows what is used, exactly as its tab does. (`status.json`'s top level stays pinned
     /// to the default Claude login regardless: that is roam's contract, not this icon's.)
@@ -480,8 +482,9 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate, UNUserNotifica
         let live = shown?.current ?? true
         item.button?.attributedTitle = NSAttributedString(string: "")
         item.button?.image = rings(shown, s, live: live)
-        let scale = live ? "session and week speed (projected % at reset; solid red = runs out first)"
-                         : "session and week used at the last check (green = it has reset since; solid red = used up)"
+        let what = ringPair(shown?.windows ?? s.windows).compactMap { $0.map { $0.key.hasPrefix("weekly_scoped:") ? name($0.key) : name($0.key).lowercased() } }.joined(separator: " and ")
+        let scale = live ? what + " speed (projected % at reset; solid red = runs out first)"
+                         : what + " used at the last check (green = it has reset since; solid red = used up)"
         item.button?.toolTip = [shown?.title ?? providerNames[shown?.provider ?? "claude"], shown?.email]
             .compactMap { $0 }.joined(separator: " · ") + " — " + scale
         if !stale { notifyIfNeeded(s) }
